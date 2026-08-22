@@ -109,7 +109,7 @@ char DecodeSegment(BYTE segments) {
     case 0x5C: character = 'o'; break;
     case 0x1C: character = 'u'; break;
     case 0x08: character = '_'; break;
-    case 0x0F: character = ']'; break;
+    case 0x0F: character = ')'; break;
     default: character = '?';
     }
 
@@ -316,17 +316,23 @@ struct PIT8253 {
 
 #pragma pack(push, 1)
 struct CPUZ80 {
-    BYTE A, F, B, C, D, E, H, L; //
-    BYTE A_alt, F_alt, B_alt, C_alt, D_alt, E_alt, H_alt, L_alt; //
-    WORD IX, IY; //
-    WORD PC, SP; //
-    BYTE I, R; //
+    // Основные регистры (строго 8-бит)
+    BYTE A, B, C, D, E, H, L;
+    BYTE F; // Флаги: S(7) Z(6) X(5) H(4) X(3) P/V(2) N(1) C(0)
+
+    // Альтернативные регистры (строго 8-бит shadow set)
+    BYTE A_alt, F_alt, B_alt, C_alt, D_alt, E_alt, H_alt, L_alt;
+
+    // Системные регистры (16-бит и 8-бит)
+    WORD PC, SP;
+    WORD IX, IY;
+    BYTE I, R;
     // IM0 support helper: byte placed on data bus by external device when IM=0
     BYTE interrupt_vector_bus_byte = 0x00;
-    bool IFF1, IFF2; //
-    BYTE IM; //
-    bool halted; //
-    bool int_pending; //
+    bool IFF1, IFF2; // Флаги разрешения прерываний Z80
+    BYTE IM;         // Режим прерываний (0, 1 или 2)
+    bool halted;
+    bool int_pending;
     int ei_delay_counter = 0; // counter to implement EI one-instruction delay (2 -> will enable after next step)
 
     BYTE ppi_pa, ppi_pb, ppi_pc, ppi_ctrl; //
@@ -335,7 +341,11 @@ struct CPUZ80 {
         PC = 0x0000;
         SP = 0x3FFF;
         A = 0; F = 0; B = 0; C = 0; D = 0; E = 0; H = 0; L = 0;
-        IX = 0; IY = 0; IFF1 = IFF2 = false; IM = 0; halted = false;
+        IX = 0; IY = 0; IFF1 = IFF2 = false; 
+        IM = 0; 
+        halted = false;
+        int_pending = false;
+        ei_delay_counter = 0;
 
         // Аппаратный /RES сбрасывает и КР580ВВ55А — обязательно возвращаем
         // выбор банка ПЗУ (PA6) и остальные защёлки портов в исходное состояние,
@@ -348,7 +358,7 @@ struct CPUZ80 {
         // Очищаем ОЗУ
         for (int i = 0; i < 8192; ++i) {
             ram[i] = rand() & 255;
-        }   
+        }
     }
 
     // --- ПАССИВНАЯ ФУНКЦИЯ ОБНОВЛЕНИЯ ДИСПЛЕЯ И ТРУБКИ ---
@@ -540,6 +550,7 @@ struct CPUZ80 {
             ei_delay_counter--;
             if (ei_delay_counter == 0) {
                 IFF1 = true; // enable interrupts after one instruction following EI
+                IFF2 = true;
             }
         }
         
@@ -727,27 +738,10 @@ struct CPUZ80 {
         case 0x32: { WORD l = ReadMem(PC++); WORD h = ReadMem(PC++); WriteMem((h << 8) | l, A); return 13; } // LD (nn), A
         case 0x3A: { WORD l = ReadMem(PC++); WORD h = ReadMem(PC++); A = ReadMem((h << 8) | l); return 13; } // LD A, (nn)
 
-                 // --- ИСПРАВЛЕННЫЕ ИНСТРУКЦИИ 16-БИТНОГО СЛОЖЕНИЯ (ADD HL, ss) ---
-        case 0x09: {
-            DWORD hl = GetHL(); DWORD bc = GetBC(); DWORD res = hl + bc;
-            F = (F & (F_Z | F_S | F_V)) | (((hl & 0x0FFF) + (bc & 0x0FFF) > 0x0FFF) ? F_H : 0) | ((res & 0x10000) ? F_C : 0);
-            SetHL((WORD)res); return 11;
-        }
-        case 0x19: {
-            DWORD hl = GetHL(); DWORD de = GetDE(); DWORD res = hl + de;
-            F = (F & (F_Z | F_S | F_V)) | (((hl & 0x0FFF) + (de & 0x0FFF) > 0x0FFF) ? F_H : 0) | ((res & 0x10000) ? F_C : 0);
-            SetHL((WORD)res); return 11;
-        }
-        case 0x29: {
-            DWORD hl = GetHL(); DWORD res = hl + hl;
-            F = (F & (F_Z | F_S | F_V)) | (((hl & 0x0FFF) + (hl & 0x0FFF) > 0x0FFF) ? F_H : 0) | ((res & 0x10000) ? F_C : 0);
-            SetHL((WORD)res); return 11;
-        }
-        case 0x39: {
-            DWORD hl = GetHL(); DWORD sp = SP; DWORD res = hl + sp;
-            F = (F & (F_Z | F_S | F_V)) | (((hl & 0x0FFF) + (sp & 0x0FFF) > 0x0FFF) ? F_H : 0) | ((res & 0x10000) ? F_C : 0);
-            SetHL((WORD)res); return 11;
-        }
+        case 0x09: { DWORD res = GetHL() + GetBC(); F = (F & (F_Z | F_S | F_V)) | (((GetHL() & 0xFFF) + (GetBC() & 0xFFF) & 0x1000) ? F_H : 0) | ((res & 0x10000) ? F_C : 0); SetHL((WORD)res); return 11; }
+        case 0x19: { DWORD res = GetHL() + GetDE(); F = (F & (F_Z | F_S | F_V)) | (((GetHL() & 0xFFF) + (GetDE() & 0xFFF) & 0x1000) ? F_H : 0) | ((res & 0x10000) ? F_C : 0); SetHL((WORD)res); return 11; }
+        case 0x29: { DWORD res = GetHL() + GetHL(); F = (F & (F_Z | F_S | F_V)) | (((GetHL() & 0xFFF) + (GetHL() & 0xFFF) & 0x1000) ? F_H : 0) | ((res & 0x10000) ? F_C : 0); SetHL((WORD)res); return 11; }
+        case 0x39: { DWORD res = GetHL() + SP; F = (F & (F_Z | F_S | F_V)) | (((GetHL() & 0xFFF) + (SP & 0xFFF) & 0x1000) ? F_H : 0) | ((res & 0x10000) ? F_C : 0); SetHL((WORD)res); return 11; }
 
         case 0x03: { WORD bc = GetBC(); bc++; SetBC(bc); return 6; } // INC BC
         case 0x0B: { WORD bc = GetBC(); bc--; SetBC(bc); return 6; } // DEC BC
@@ -775,7 +769,7 @@ struct CPUZ80 {
 
         case 0x76: { halted = true; return 4; } // HALT
         case 0xFB: { /* EI - enable interrupts after one instruction */ ei_delay_counter = 2; return 4; } // EI (delayed)
-        case 0xF3: { IFF1 = false; return 4; } // DI
+        case 0xF3: { IFF1 = false; IFF2 = false; ei_delay_counter = 0; return 4; } // DI
 
         case 0x08: { BYTE t = A; A = A_alt; A_alt = t; t = F; F = F_alt; F_alt = t; return 4; } // EX AF, AF'
         case 0xD9: { BYTE t; t = B; B = B_alt; B_alt = t; t = C; C = C_alt; C_alt = t; t = D; D = D_alt; D_alt = t; t = E; E = E_alt; E_alt = t; t = H; H = H_alt; H_alt = t; t = L; L = L_alt; L_alt = t; return 4; } // EXX
@@ -845,84 +839,28 @@ struct CPUZ80 {
         case 0xC3: { WORD l = ReadMem(PC++); WORD h = ReadMem(PC++); PC = (h << 8) | l; return 10; }
         case 0xE9: { PC = GetHL(); return 4; }
         case 0xF9: { SP = GetHL(); return 6; }
-        case 0xCD: { // CALL nn
-            WORD l = ReadMem(PC); PC = (PC + 1) & 0xFFFF;
-            WORD h = ReadMem(PC); PC = (PC + 1) & 0xFFFF;
-            SP = (SP - 1) & 0xFFFF; WriteMem(SP, (BYTE)(PC >> 8));
-            SP = (SP - 1) & 0xFFFF; WriteMem(SP, (BYTE)(PC & 0xFF));
-            PC = (h << 8) | l;
-            return 17;
-        }
-        case 0xC9: { // RET
-            WORD low = ReadMem(SP); SP = (SP + 1) & 0xFFFF;
-            WORD high = ReadMem(SP); SP = (SP + 1) & 0xFFFF;
-            PC = (high << 8) | low;
-            return 10;
-        }
+        case 0xCD: { WORD l = ReadMem(PC++); WORD h = ReadMem(PC++); WriteMem(--SP, (BYTE)(PC >> 8)); WriteMem(--SP, (BYTE)(PC & 0xFF)); PC = (h << 8) | l; return 17; }
+        case 0xC9: { BYTE l = ReadMem(SP++); BYTE h = ReadMem(SP++); PC = (h << 8) | l; return 10; }
 
-#define JP_COND(cond) { \
-    WORD l = ReadMem(PC); \
-    PC = (PC + 1) & 0xFFFF; \
-    WORD h = ReadMem(PC); \
-    PC = (PC + 1) & 0xFFFF; \
-    if (cond) PC = (h << 8) | l; \
-    return 10; \
-}
+#define JP_COND(cond) { WORD l = ReadMem(PC++); WORD h = ReadMem(PC++); if (cond) PC = (h << 8) | l; return 10; }
+#define CALL_COND(cond) { WORD l = ReadMem(PC++); WORD h = ReadMem(PC++); if (cond) { WriteMem(--SP, (BYTE)(PC >> 8)); WriteMem(--SP, (BYTE)(PC & 0xFF)); PC = (h << 8) | l; return 17; } return 10; }
+#define RET_COND(cond) { if (cond) { BYTE l = ReadMem(SP++); BYTE h = ReadMem(SP++); PC = (h << 8) | l; return 11; } return 5; }
 
-#define CALL_COND(cond) { \
-    WORD l = ReadMem(PC); \
-    PC = (PC + 1) & 0xFFFF; \
-    WORD h = ReadMem(PC); \
-    PC = (PC + 1) & 0xFFFF; \
-    if (cond) { \
-        SP = (SP - 1) & 0xFFFF; \
-        WriteMem(SP, (BYTE)(PC >> 8)); \
-        SP = (SP - 1) & 0xFFFF; \
-        WriteMem(SP, (BYTE)(PC & 0xFF)); \
-        PC = (h << 8) | l; \
-        return 17; \
-    } \
-    return 10; \
-}
+        case 0xC2: JP_COND(!(F & F_Z)); case 0xCA: JP_COND(F & F_Z); case 0xD2: JP_COND(!(F & F_C)); case 0xDA: JP_COND(F & F_C);
+        case 0xE2: JP_COND(!(F & F_V)); case 0xEA: JP_COND(F & F_V); case 0xF2: JP_COND(!(F & F_S)); case 0xFA: JP_COND(F & F_S);
+        case 0xC4: CALL_COND(!(F & F_Z)); case 0xCC: CALL_COND(F & F_Z); case 0xD4: CALL_COND(!(F & F_C)); case 0xDC: CALL_COND(F & F_C);
+        case 0xE4: CALL_COND(!(F & F_V)); case 0xEC: CALL_COND(F & F_V); case 0xF4: CALL_COND(!(F & F_S)); case 0xFC: CALL_COND(F & F_S);
+        case 0xC0: RET_COND(!(F & F_Z)); case 0xC8: RET_COND(F & F_Z); case 0xD0: RET_COND(!(F & F_C)); case 0xD8: RET_COND(F & F_C);
+        case 0xE0: RET_COND(!(F & F_V)); case 0xE8: RET_COND(F & F_V); case 0xF0: RET_COND(!(F & F_S)); case 0xF8: RET_COND(F & F_S);
 
-#define RET_COND(cond) { \
-    if (cond) { \
-        WORD low = ReadMem(SP); \
-        SP = (SP + 1) & 0xFFFF; \
-        WORD high = ReadMem(SP); \
-        SP = (SP + 1) & 0xFFFF; \
-        PC = (high << 8) | low; \
-        return 11; \
-    } \
-    return 5; \
-}
+#define PUSH_REG(h, l) { WriteMem(--SP, h); WriteMem(--SP, l); return 11; }
+#define POP_REG(h, l) { l = ReadMem(SP++); h = ReadMem(SP++); return 10; }
+        case 0xC5: PUSH_REG(B, C); case 0xD5: PUSH_REG(D, E); case 0xE5: PUSH_REG(H, L); case 0xF5: PUSH_REG(A, F);
+        case 0xC1: POP_REG(B, C); case 0xD1: POP_REG(D, E); case 0xE1: POP_REG(H, L); case 0xF1: POP_REG(A, F);
 
-        case 0xC2: JP_COND(!(F & F_Z)); break; case 0xCA: JP_COND(F & F_Z); break; case 0xD2: JP_COND(!(F & F_C)); break; case 0xDA: JP_COND(F & F_C); break;
-        case 0xE2: JP_COND(!(F & F_V)); break; case 0xEA: JP_COND(F & F_V); break; case 0xF2: JP_COND(!(F & F_S)); break; case 0xFA: JP_COND(F & F_S); break;
-        case 0xC4: CALL_COND(!(F & F_Z)); break; case 0xCC: CALL_COND(F & F_Z); break; case 0xD4: CALL_COND(!(F & F_C)); break; case 0xDC: CALL_COND(F & F_C); break;
-        case 0xE4: CALL_COND(!(F & F_V)); break; case 0xEC: CALL_COND(F & F_V); break; case 0xF4: CALL_COND(!(F & F_S)); break; case 0xFC: CALL_COND(F & F_S); break;
-        case 0xC0: RET_COND(!(F & F_Z)); break; case 0xC8: RET_COND(F & F_Z); break; case 0xD0: RET_COND(!(F & F_C)); break; case 0xD8: RET_COND(F & F_C); break;
-        case 0xE0: RET_COND(!(F & F_V)); break; case 0xE8: RET_COND(F & F_V); break; case 0xF0: RET_COND(!(F & F_S)); break; case 0xF8: RET_COND(F & F_S); break;
-
-#define PUSH_REG(h, l) { \
-    SP = (SP - 1) & 0xFFFF; WriteMem(SP, h); \
-    SP = (SP - 1) & 0xFFFF; WriteMem(SP, l); \
-    return 11; \
-}
-
-#define POP_REG(h, l) { \
-    l = ReadMem(SP); SP = (SP + 1) & 0xFFFF; \
-    h = ReadMem(SP); SP = (SP + 1) & 0xFFFF; \
-    return 10; \
-}
-
-        case 0xC5: PUSH_REG(B, C); break; case 0xD5: PUSH_REG(D, E); break; case 0xE5: PUSH_REG(H, L); break; case 0xF5: PUSH_REG(A, F); break;
-        case 0xC1: POP_REG(B, C); break; case 0xD1: POP_REG(D, E); break; case 0xE1: POP_REG(H, L); break; case 0xF1: POP_REG(A, F); break;
-
-#define RST_VEC(adr) {     WORD _old_pc = PC, _old_sp = SP;     WriteMem(--SP, (BYTE)(PC >> 8));     WriteMem(--SP, (BYTE)(PC & 0xFF));     PC = adr;     return 11; }
-
-        case 0xC7: RST_VEC(0x00); break; case 0xCF: RST_VEC(0x08); break; case 0xD7: RST_VEC(0x10); break; case 0xDF: RST_VEC(0x18); break;
-        case 0xE7: RST_VEC(0x20); break; case 0xEF: RST_VEC(0x28); break; case 0xF7: RST_VEC(0x30); break; case 0xFF: RST_VEC(0x38); break;
+#define RST_VEC(adr) { WriteMem(--SP, (BYTE)(PC >> 8)); WriteMem(--SP, (BYTE)(PC & 0xFF)); PC = adr; return 11; }
+        case 0xC7: RST_VEC(0x00); case 0xCF: RST_VEC(0x08); case 0xD7: RST_VEC(0x10); case 0xDF: RST_VEC(0x18);
+        case 0xE7: RST_VEC(0x20); case 0xEF: RST_VEC(0x28); case 0xF7: RST_VEC(0x30); case 0xFF: RST_VEC(0x38);
 
         case 0xCB: {
             BYTE subOp = ReadMem(PC++);
@@ -950,13 +888,7 @@ struct CPUZ80 {
                 F = (val == 0 ? F_Z : 0) | (val & 0x80 ? F_S : 0) | (c ? F_C : 0) | (parity_table[val & 0xFF] ? F_V : 0);
             }
             else if (type == 1) {
-                // BIT b,r : Z set if tested bit == 0, S set only for bit7 when set,
-                // H = 1, N = 0, P/V = Z, carry preserved
-                BYTE bitmask = (1 << bit);
-                BYTE zflag = (!(val & bitmask)) ? F_Z : 0;
-                BYTE sflag = (bit == 7 && (val & 0x80)) ? F_S : 0;
-                BYTE vflag = zflag; // P/V mirrors Z for BIT
-                F = (F & F_C) | F_H | zflag | sflag | vflag; // N cleared implicitly
+                F = (F & F_C) | F_H | (!(val & (1 << bit)) ? F_Z : 0) | (bit == 7 && (val & 0x80) ? F_S : 0);
             }
             else if (type == 2) { val &= ~(1 << bit); }
             else if (type == 3) { val |= (1 << bit); }
@@ -970,69 +902,35 @@ struct CPUZ80 {
 
         case 0xED: {
             BYTE subOp = ReadMem(PC++);
+
+            // 1. Команды сложения и вычитания 16-бит с переносом: ADC HL, ss / SBC HL, ss
             if ((subOp & 0xCF) == 0x42 || (subOp & 0xCF) == 0x4A) {
-                // ED 42/52/62/72 = SBC HL,ss
-                // ED 4A/5A/6A/7A = ADC HL,ss
-                WORD hl_val = GetHL();
-                WORD ss_val = 0;
+                DWORD hl_val = GetHL(); DWORD ss_val = 0;
                 BYTE ss = (subOp >> 4) & 3;
-                if (ss == 0) ss_val = GetBC();
-                else if (ss == 1) ss_val = GetDE();
-                else if (ss == 2) ss_val = GetHL();
-                else ss_val = SP;
-
-                const WORD carry = (F & F_C) ? 1 : 0;
-                const bool is_sbc = ((subOp & 0x0F) == 0x02);
-
+                if (ss == 0) ss_val = GetBC(); else if (ss == 1) ss_val = GetDE();
+                else if (ss == 2) ss_val = GetHL(); else if (ss == 3) ss_val = SP;
+                DWORD carry = (F & F_C) ? 1 : 0;
+                bool is_sbc = ((subOp & 0x0F) == 0x02);
                 if (is_sbc) {
-                    const int32_t signed_res =
-                        (int32_t)(int16_t)hl_val -
-                        (int32_t)(int16_t)ss_val -
-                        (int32_t)carry;
-                    const WORD res = (WORD)(hl_val - ss_val - carry);
-                    const bool cflag =
-                        (uint32_t)hl_val < ((uint32_t)ss_val + carry);
-                    const bool hflag =
-                        (int32_t)(hl_val & 0x0FFF) -
-                        (int32_t)(ss_val & 0x0FFF) -
-                        (int32_t)carry < 0;
-                    const bool vflag =
-                        signed_res < -32768 || signed_res > 32767;
-
-                    SetHL(res);
-                    F = F_N |
-                        (res == 0 ? F_Z : 0) |
-                        (res & 0x8000 ? F_S : 0) |
-                        (hflag ? F_H : 0) |
-                        (vflag ? F_V : 0) |
-                        (cflag ? F_C : 0);
+                    DWORD res = (hl_val - ss_val - carry) & 0xFFFFFFFF; F = F_N;
+                    if ((res & 0xFFFF) == 0) F |= F_Z; if (res & 0x8000) F |= F_S;
+                    if (hl_val < (ss_val + carry)) F |= F_C;
+                    if (((hl_val & 0x0FFF) - (ss_val & 0x0FFF) - carry) & 0x1000) F |= F_H;
+                    if (((hl_val ^ ss_val) & (hl_val ^ res)) & 0x8000) F |= F_V;
+                    SetHL((WORD)res);
                 }
                 else {
-                    const int32_t signed_res =
-                        (int32_t)(int16_t)hl_val +
-                        (int32_t)(int16_t)ss_val +
-                        (int32_t)carry;
-                    const uint32_t full_res =
-                        (uint32_t)hl_val + (uint32_t)ss_val + carry;
-                    const WORD res = (WORD)full_res;
-                    const bool cflag = (full_res & 0x10000u) != 0;
-                    const bool hflag =
-                        ((hl_val & 0x0FFFu) +
-                            (ss_val & 0x0FFFu) +
-                            carry) > 0x0FFFu;
-                    const bool vflag =
-                        signed_res < -32768 || signed_res > 32767;
-
-                    SetHL(res);
-                    F =
-                        (res == 0 ? F_Z : 0) |
-                        (res & 0x8000 ? F_S : 0) |
-                        (hflag ? F_H : 0) |
-                        (vflag ? F_V : 0) |
-                        (cflag ? F_C : 0);
+                    DWORD res = hl_val + ss_val + carry; F = 0;
+                    if ((res & 0xFFFF) == 0) F |= F_Z; if (res & 0x8000) F |= F_S;
+                    if (res & 0x10000) F |= F_C;
+                    if (((hl_val & 0x0FFF) + (ss_val & 0x0FFF) + carry) & 0x1000) F |= F_H;
+                    if (((hl_val ^ ss_val ^ 0x8000) & (ss_val ^ res)) & 0x8000) F |= F_V;
+                    SetHL((WORD)res);
                 }
                 return 15;
             }
+
+            // 2. Команды загрузки 16-битных регистров из памяти: LD (nn), dd / LD dd, (nn)
             if ((subOp & 0xCF) == 0x43 || (subOp & 0xCF) == 0x4B) {
                 WORD l = ReadMem(PC++); WORD h = ReadMem(PC++);
                 WORD adr = (h << 8) | l; BYTE dd = (subOp >> 4) & 3;
@@ -1048,6 +946,8 @@ struct CPUZ80 {
                 }
                 return 20;
             }
+
+            // 3. Аппаратно точная дешифрация команд ввода-вывода: IN r, (C) / OUT (C), r
             if ((subOp & 0xC0) == 0x40 && (subOp & 0x07) <= 1) {
                 BYTE regIdx = ((subOp & 0xFF) >> 3) & 7;
                 bool is_out = ((subOp & 1) != 0);
@@ -1069,38 +969,18 @@ struct CPUZ80 {
                     return 12;
                 }
             }
+
+            // 4. Одиночные подкоманды префикса 0xED
             switch (subOp) {
             case 0xB0: { // LDIR
                 WORD src = GetHL(); WORD dest = GetDE(); WORD len = GetBC();
-                uint32_t count = (len == 0) ? 65536u : (uint32_t)len;
-                uint32_t original_len = count;
-                BYTE last = A;
-                while (count > 0) {
-                    last = ReadMem(src);
-                    WriteMem(dest, last);
-                    src++; dest++; count--;
-                }
-                SetHL(src); SetDE(dest); SetBC(0);
-                // LDIR: H/N cleared, P/V reflects BC != 0 (zero here).
-                // S/Z/C are preserved; bits 3/5 come from A+last.
-                F &= ~(F_N | F_H | F_V);
-                F = (F & ~(0x28)) | ((BYTE)(A + last) & 0x28);
-                return (int)(21 * (original_len - 1) + 16);
+                while (len > 0) { WriteMem(dest, ReadMem(src)); src++; dest++; len--; }
+                SetHL(src); SetDE(dest); SetBC(0); F &= ~(F_N | F_H | F_V); return 21;
             }
             case 0xB8: { // LDDR
                 WORD src = GetHL(); WORD dest = GetDE(); WORD len = GetBC();
-                uint32_t count = (len == 0) ? 65536u : (uint32_t)len;
-                uint32_t original_len = count;
-                BYTE last = A;
-                while (count > 0) {
-                    last = ReadMem(src);
-                    WriteMem(dest, last);
-                    src--; dest--; count--;
-                }
-                SetHL(src); SetDE(dest); SetBC(0);
-                F &= ~(F_N | F_H | F_V);
-                F = (F & ~(0x28)) | ((BYTE)(A + last) & 0x28);
-                return (int)(21 * (original_len - 1) + 16);
+                while (len > 0) { WriteMem(dest, ReadMem(src)); src--; dest--; len--; }
+                SetHL(src); SetDE(dest); SetBC(0); F &= ~(F_N | F_H | F_V); return 21;
             }
             case 0xA0: { // LDI
                 WriteMem(GetDE(), ReadMem(GetHL())); SetHL(GetHL() + 1); SetDE(GetDE() + 1); SetBC(GetBC() - 1);
@@ -1110,7 +990,6 @@ struct CPUZ80 {
                 WriteMem(GetDE(), ReadMem(GetHL())); SetHL(GetHL() - 1); SetDE(GetDE() - 1); SetBC(GetBC() - 1);
                 F &= ~(F_N | F_H | F_V); if (GetBC() != 0) F |= F_V; return 14;
             }
-
             case 0xA1: case 0xB1: { // CPI / CPIR
                 BYTE val = ReadMem(GetHL()); int res = A - val; SetHL(GetHL() + 1); SetBC(GetBC() - 1);
                 F = (F & F_C) | F_N | (res == 0 ? F_Z : 0) | (res & 0x80 ? F_S : 0) | (((A & 0x0F) - (val & 0x0F)) & 0x10 ? F_H : 0) | (GetBC() != 0 ? F_V : 0);
@@ -1124,21 +1003,9 @@ struct CPUZ80 {
                 BYTE val = ReadMem(GetHL()); PortOut(GetBC(), val); B--; SetHL(GetHL() + 1);
                 F = F_N | (B == 0 ? F_Z : 0) | (B & 0x80 ? F_S : 0); if (subOp == 0xB3 && B != 0) { PC -= 2; return 21; } return 16;
             }
-            case 0x44: {
-                BYTE old = A;
-                BYTE res = (BYTE)(0 - old);
-                A = res;
-                // NEG sets N; Z,S as usual; C if A != 0; H if borrow from bit 4; P/V for overflow (old == 0x80)
-                F = F_N;
-                if (res == 0) F |= F_Z;
-                if (res & 0x80) F |= F_S;
-                if (old != 0) F |= F_C;
-                if ((old & 0x0F) != 0) F |= F_H;
-                if (old == 0x80) F |= F_V;
-                return 8;
-            } // NEG
-            case 0x45: { IFF1 = IFF2; BYTE l = ReadMem(SP++); BYTE h = ReadMem(SP++); PC = ((WORD)h << 8) | l; return 14; } // RETN
-            case 0x4D: { IFF1 = IFF2; BYTE l = ReadMem(SP++); BYTE h = ReadMem(SP++); PC = ((WORD)h << 8) | l; return 14; } // RETI
+            case 0x44: { A = 0 - A; F = F_N | (A == 0 ? F_Z : 0) | (A & 0x80 ? F_S : 0); return 8; } // NEG
+            case 0x45: { IFF1 = IFF2; BYTE l = ReadMem(SP++); BYTE h = ReadMem(SP++); PC = (h << 8) | l; return 14; } // RETN
+            case 0x4D: { IFF1 = IFF2; BYTE l = ReadMem(SP++); BYTE h = ReadMem(SP++); PC = (h << 8) | l; return 14; } // RETI
             case 0x46: { IM = 0; return 8; } case 0x56: { IM = 1; return 8; } case 0x5E: { IM = 2; return 8; }
             case 0x47: { I = A; return 9; } case 0x57: { A = I; F = (F & F_C) | (A == 0 ? F_Z : 0) | (A & 0x80 ? F_S : 0) | (IFF2 ? F_V : 0); return 9; }
             case 0x4F: { R = A; return 9; } case 0x5F: { A = R; F = (F & F_C) | (A == 0 ? F_Z : 0) | (A & 0x80 ? F_S : 0) | (IFF2 ? F_V : 0); return 9; }
@@ -1212,8 +1079,13 @@ struct CPUZ80 {
                 return 23;
             }
 
-            // Indexed 16-bit loads/stores and stack operations.
+             // --- ПОЛНАЯ ПОДДЕРЖКА ДОКУМЕНТИРОВАННЫХ И НЕДОКУМЕНТИРОВАННЫХ КОМАНД IX/IY ---
             WORD& index = use_iy ? IY : IX;
+
+            // Выделяем ссылки на половинки регистров для недокументированных опкодов
+            BYTE& index_h = use_iy ? *(BYTE*)((BYTE*)&IY + 1) : *(BYTE*)((BYTE*)&IX + 1);
+            BYTE& index_l = use_iy ? *(BYTE*)((BYTE*)&IY) : *(BYTE*)((BYTE*)&IX);
+
             if (subOp == 0x21) {
                 WORD l = ReadMem(PC++), h = ReadMem(PC++);
                 index = (WORD)((h << 8) | l);
@@ -1358,9 +1230,58 @@ struct CPUZ80 {
                 return 19;
             }
 
-            // The common register forms of DD/FD are officially ignored as
-            // prefixes by the Z80; for the ROM paths we care about, returning
-            // the base instruction timing is sufficient.
+            // --- ИСПРАВЛЕНО: ДЕКОДИРОВАНИЕ НЕДОКУМЕНТИРОВАННЫХ ОПКОДОВ ДЛЯ ПОЛОВИНОК IX/IY ---
+            // Сюда попадает ваш опкод 0x54 (LD D, IXH) и все операции ALU над половинками регистров
+            {
+                BYTE destReg = (subOp >> 3) & 7;
+                BYTE srcReg = subOp & 7;
+
+                // Перенаправление обращений к H/L на половинки IXH/IXL (или IYH/IYL)
+                auto get_val = [&](BYTE reg) -> BYTE {
+                    if (reg == 0) return B; if (reg == 1) return C; if (reg == 2) return D; if (reg == 3) return E;
+                    if (reg == 4) return index_h; // Вместо H читаем старшую половинку индекса
+                    if (reg == 5) return index_l; // Вместо L читаем младшую половинку индекса
+                    if (reg == 7) return A;
+                    return 0;
+                    };
+
+                // Одиночные операции INC/DEC над половинками регистров (0x24, 0x25, 0x2C, 0x2D)
+                if ((subOp & 0xC7) == 0x04) {
+                    BYTE r = (subOp >> 3) & 7;
+                    if (r == 4) { INC_REG(index_h); } if (r == 5) { INC_REG(index_l); }
+                }
+                if ((subOp & 0xC7) == 0x05) {
+                    BYTE r = (subOp >> 3) & 7;
+                    if (r == 4) { DEC_REG(index_h); } if (r == 5) { DEC_REG(index_l); }
+                }
+
+                // Команды типа LD r, r' над половинками регистров
+                if ((subOp & 0xC0) == 0x40) {
+                    BYTE val = get_val(srcReg);
+                    if (destReg == 0) B = val; else if (destReg == 1) C = val;
+                    else if (destReg == 2) D = val; else if (destReg == 3) E = val;
+                    else if (destReg == 4) index_h = val; else if (destReg == 5) index_l = val;
+                    else if (destReg == 7) A = val;
+                    return 4;
+                }
+
+                // Операции ALU над половинками регистров (ADD, SUB, AND, CP и т.д.)
+                if ((subOp & 0xC0) == 0x80) {
+                    BYTE val = get_val(srcReg);
+                    switch ((subOp >> 3) & 7) {
+                    case 0: ALU_ADD(val); break; case 1: ALU_ADC(val); break;
+                    case 2: ALU_SUB(val); break; case 3: ALU_SBC(val); break;
+                    case 4: ALU_AND(val); break; case 5: ALU_XOR(val); break;
+                    case 6: ALU_OR(val); break;  case 7: ALU_CP(val); break;
+                    }
+                    return 4;
+                }
+
+                // Опкоды загрузки непосредственного значения типа LD IXH, n
+                if (subOp == 0x26) { index_h = ReadMem(PC++); return 7; }
+                if (subOp == 0x2E) { index_l = ReadMem(PC++); return 7; }
+            }
+
             return 4;
         }
 
@@ -1469,6 +1390,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             cpu.Reset(); last_read_key_char = L'-';
             for (int d = 0; d < 8; ++d) { display_digits[d] = ' '; display_latch[d] = ' '; digit_lifetime[d] = 0; }
             cpu.UpdateHardwareState();
+            SetFocus(hwnd);
         }
         break;
     }

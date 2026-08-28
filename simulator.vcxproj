@@ -147,6 +147,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="simulator.cpp" />
+    <ClCompile Include="z80.c" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="simulator.rc" />

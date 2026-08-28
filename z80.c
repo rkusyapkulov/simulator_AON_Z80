@@ -1,846 +1,871 @@
-﻿#ifndef UNICODE
-#define UNICODE
-#endif
-#ifndef _UNICODE
-#define _UNICODE
-#endif
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "winmm.lib")
-#define OUT_OUTLINE_PRECISION 8
-#define CLIP_DEFAULT_PRECISION 0
-#include <windows.h>
-#include <stdio.h>
-#include <string.h>
+﻿#include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdbool.h> // Обеспечивает полную совместимость bool между C и C++
 
-// --- СОВМЕСТИМОСТЬ С СИ-СТРУКТУРОЙ ИЗ Z80.C ---
-typedef uint8_t  u8;
+// ---------------------------------------
+// ABBREVIATIONS & TYPES
+
+typedef int8_t i8;
+typedef uint8_t u8;
 typedef uint16_t u16;
-typedef int8_t   i8;
+typedef bool bv;
 
-extern "C" {
-    // 1. Объявляем плоские Си-функции, которые реально существуют в z80.c
-    void init(void);
-    int step(void);
-    void gen_nmi(void);
-    void gen_int(u8 data);
+#define SI static inline
+#define R return
 
-    // 2. Объявляем структуру в точности такой, какая она в z80.c
-    struct CPUZ80 {
-        u16 PC, SP, IX, IY;
-        u16 wz;
-        u8 A, B, C, D, E, H, L;
-        u8 A_alt, B_alt, C_alt, D_alt, E_alt, H_alt, L_alt, F_alt;
-        u8 I, RR;
-        u8 F;
-        u8 iff_set;
-        bool IFF1, IFF2;
-        u8 IM;
-        u8 int_vec;
-        bool int_pending, nmi_pending;
-        bool halted;
+// Defining a single-expression function body.
+// Equivalent declarations:
+// u8 f(u8 a)_(a * 2)
+// u8 f(u8 a) { return a * 2; }
+#define _(...) { return (__VA_ARGS__); }
 
-        // Вместо __thiscall методов делаем inline-вызовы плоских Си-функций.
-        // Это сохраняет синтаксис cpu.step() и cpu.init() во всём C++ коде!
-        inline void init() { ::init(); }
-        inline int step() { return ::step(); }
-        inline void gen_nmi() { ::gen_nmi(); }
-        inline void gen_int(u8 data) { ::gen_int(data); }
-    };
+// ---------------------------------------
+// GLOBAL CPU STRUCTURE DEFINITION
 
-    // Глобальный объект процессора, выделенный в z80.c
-    extern struct CPUZ80 cpu;
-}
-
-// Helper macros/functions updated to route through cpu.F and the new registers
-static inline u16 GetHL() { return ((u16)cpu.H << 8) | cpu.L; }
-static inline void SetHL(u16 val) { cpu.H = (u8)(val >> 8); cpu.L = (u8)(val & 0xFF); }
-static inline u16 GetBC() { return ((u16)cpu.B << 8) | cpu.C; }
-static inline void SetBC(u16 val) { cpu.B = (u8)(val >> 8); cpu.C = (u8)(val & 0xFF); }
-static inline u16 GetDE() { return ((u16)cpu.D << 8) | cpu.E; }
-static inline void SetDE(u16 val) { cpu.D = (u8)(val >> 8); cpu.E = (u8)(val & 0xFF); }
-
-static inline u8 get_f() { return cpu.F; }
-static inline void set_f(u8 val) { cpu.F = val; }
-
-// --- КОНСТАНТЫ АРХИТЕКТУРЫ Z80 АОН (СТРОГО ПО ПРИНЦИПИАЛЬНОЙ СХЕМЕ) ---
-const DWORD ROM_SIZE = 65536; // Физическое адресное пространство под ПЗУ (до 64 КБ)
-const DWORD RAM_SIZE = 8192;  // Физический размер микросхемы ОЗУ РУ17 (строго 8 КБ)
-BYTE rom[ROM_SIZE];           // Сюда загружается прошивка
-BYTE ram[RAM_SIZE];           // Физические 8 КБ оперативной памяти
-int rom_size = 2048;
-
-long loaded_rom_file_size = 2048; //
-wchar_t last_read_key_char = L'-'; //
-char display_digits[9] = { ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' }; //
-char display_latch[9] = { ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' , ' ' }; //
-int digit_lifetime[9] = { 0 }; //
-const int MAX_LIFETIME = 25;   // Скорректировано для плавного послесвечения
-
-int active_digit = 0;              // Текущий выбранный разряд дисплея (AON.select)
-BYTE ir23_display_segments = 0x00; // Хранит текущую маску сегментов, записанную в ИР23
-bool keys_pressed[12] = { false }; // Оставляем для связи с 12 GUI кнопками
-
-// --- ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ СТРУКТУРА МАТРИЦЫ КЛАВИАТУРЫ РУСЬ-9 ---
-// Пересчитана на основе эмпирической карты откликов.
-// Средний вертикальный ряд переведен на линию KD3 {3}, чтобы обойти блокировку шины.
-struct KeyMatrixMap {
-    BYTE port_b_bit; // 0..3 (Линии KD0..KD3 на Порту B)
-    BYTE id4_row;    // 0..7 (Выходы дешифратора DD9 ИД4)
-} key_matrix_layout[12] = {
-    {0, 2}, {2, 2}, {3, 2}, // '1', '2', '3'
-    {0, 3}, {2, 3}, {3, 3}, // '4', '5', '6'
-    {0, 0}, {2, 0}, {3, 0}, // '7', '8', '9'
-    {0, 1}, {2, 1}, {3, 1}  // '*', '0', '#'
+struct CPUZ80 {
+    u16 PC, SP, IX, IY;
+    u16 wz;
+    u8 A, B, C, D, E, H, L;
+    u8 A_alt, B_alt, C_alt, D_alt, E_alt, H_alt, L_alt, F_alt;
+    u8 I, RR;
+    u8 F;
+    u8 iff_set;
+    bool IFF1, IFF2;
+    u8 IM;
+    u8 int_vec;
+    bool int_pending, nmi_pending;
+    bool halted;
 };
 
-bool emulator_running = true; //
+// Выделение глобального экземпляра, сопоставимого с extern в C++
+struct CPUZ80 cpu;
 
-// --- ЗВУКОВАЯ СИСТЕМА И КОЛЬЦЕВОЙ БУФЕР ---
-bool rk_inte_speaker_state = false; //
-bool rk_port_c_speaker_state = false; //
-bool vi53_out0_state = false; //
-const int AUDIO_SAMPLE_RATE = 22050; //
-HWAVEOUT hWaveOut = NULL; //
-WAVEHDR waveHeader[2]; //
-short* audioBuffers[2] = { NULL, NULL }; //
-const int AUDIO_BUF_SIZE = 1024; //
-const int INTE_RING_BUF_SIZE = 16384; //
-short inte_ring_buffer[INTE_RING_BUF_SIZE] = { 0 }; //
-volatile int inte_ring_write_ptr = 0; //
-volatile int inte_ring_read_ptr = 0; //
+// ---------------------------------------
+// EXTERNAL PERIPHERAL CALLBACKS
 
-HWND hEditDisplay = NULL; //
-HWND hEditDebug = NULL; //
-HWND hEditRAM = NULL; //
-HWND hEditRAM_Low = NULL; //
-HWND hBtnKeys[12] = { NULL }; //
-UINT_PTR timerId = 0; //
-WNDPROC OldButtonProc = NULL; //
+extern u8 ReadByte(u16 addr);
+extern void WriteByte(u16 addr, u8 val);
+extern u8 InPort(u16 port);
+extern void OutPort(u16 port, u8 val);
 
-struct PIT8253 {
-    struct Channel {
-        WORD count_register;   // Регистр предустановки счетчика
-        WORD latch_register;   // Регистр защелки данных
-        int count_down;       // Текущее значение бегущего счетчика
-        BYTE mode;             // Режим работы (0..5)
-        BYTE read_write_state; // Триггер фазы доступа LSB/MSB (0 или 1)
-        BYTE access_mode;      // Режим доступа (1-LSB, 2-MSB, 3-BOTH)
-        bool latched;          // Флаг фиксации данных в защелке
-        bool out_signal;       // Физический уровень на выходе OUT канала
-        bool gate;              // новое поле — состояние входа GATE канала
-    } channels[3];
+// Прототипы методов
+void init(void);
+int step(void);
+void gen_nmi(void);
+void gen_int(u8 data);
 
-    void Reset() {
-        for (int i = 0; i < 3; i++) {
-            channels[i].count_register = 0xFFFF; // Инициализируем максимальным периодом Intel
-            channels[i].latch_register = 0;
-            channels[i].count_down = 0xFFFF;
-            channels[i].mode = 1;                // По умолчанию Mode 1 строго по Borik
-            channels[i].read_write_state = 0;
-            channels[i].access_mode = 3;         // Доступ BOTH
-            channels[i].latched = false;
-            channels[i].out_signal = true;
-            channels[i].gate = true;   // безопасное начальное состояние
-        }
-    }
+// ---------------------------------------
+// BIT FLAG BITMASK HELPERS (F REGISTER)
 
-    // Вспомогательная функция: трактует 0 как 65536 (0x10000)
-    int GetCountValue(WORD val) {
-        return (val == 0) ? 65536 : (int)val;
-    }
+#define CF_MASK (1u << 0)
+#define NF_MASK (1u << 1)
+#define PF_MASK (1u << 2)
+#define XF_MASK (1u << 3)
+#define HF_MASK (1u << 4)
+#define YF_MASK (1u << 5)
+#define ZF_MASK (1u << 6)
+#define SF_MASK (1u << 7)
 
-    void WriteControl(BYTE val) {
-         int ch = (val >> 6) & 0x03;
-         if (ch == 3) return; // Read-back не поддерживается в Intel 8253
+#define GET_SF() ((cpu.F & SF_MASK) != 0)
+#define GET_ZF() ((cpu.F & ZF_MASK) != 0)
+#define GET_YF() ((cpu.F & YF_MASK) != 0)
+#define GET_HF() ((cpu.F & HF_MASK) != 0)
+#define GET_XF() ((cpu.F & XF_MASK) != 0)
+#define GET_PF() ((cpu.F & PF_MASK) != 0)
+#define GET_NF() ((cpu.F & NF_MASK) != 0)
+#define GET_CF() ((cpu.F & CF_MASK) != 0)
 
-         int access = (val >> 4) & 0x03;
-         int m = (val >> 1) & 0x07;
-         if (m > 5) m -= 4; // Коррекция для дублирующих масок режимов 2 и 3
+#define SET_FLAG_BIT(mask, cond) cpu.F = (cond) ? (cpu.F | (mask)) : (cpu.F & ~(mask))
 
-         if (access == 0) {
-             // Команда защелкивания счета (Counter Latch Command)
-             channels[ch].latch_register = channels[ch].count_down;
-             channels[ch].latched = true;
-         }
-         else {
-             channels[ch].access_mode = access;
-             channels[ch].mode = m;
-             channels[ch].read_write_state = 0;
-             channels[ch].latched = false;
-             // Инициализация выхода OUT согласно режиму:
-             // Mode 0: OUT = 0 (low)
-             // Mode 1: OUT = 1 (high)
-             // Mode 2: OUT = 1 (high)
-             // Mode 3: OUT = 1 (high)
-             // Mode 4: OUT = 1 (high)
-             // Mode 5: OUT = 1 (high)
-             channels[ch].out_signal = (m != 0);
-         }
-    }
+// ---------------------------------------
+// MEMORY / PROCESSOR STATE OPERATIONS
 
-    void WriteData(int ch, BYTE val) {
-         Channel& c = channels[ch];
-         if (c.access_mode == 1) { // Только LSB
-             c.count_register = val;
-             c.count_down = GetCountValue(c.count_register);
-         }
-         else if (c.access_mode == 2) { // Только MSB
-             c.count_register = (val << 8);
-             c.count_down = GetCountValue(c.count_register);
-         }
-         else if (c.access_mode == 3) { // Оба байта (BOTH)
-             if (c.read_write_state == 0) {
-                 c.count_register = (c.count_register & 0xFF00) | val;
-                 c.read_write_state = 1;
-             }
-             else {
-                 c.count_register = (c.count_register & 0x00FF) | (val << 8);
-                 c.count_down = GetCountValue(c.count_register);
-                 c.read_write_state = 0;
-                 // На момент полной загрузки константы взводим выход OUT согласно режиму
-                 c.out_signal = (c.mode == 0 || c.mode == 1) ? false : true;
-             }
-         }
-    }
+#define bit(n, val) (((val) >> (n)) & 1)
+#define r8(a) ReadByte(a)
+#define w8(a, v) WriteByte(a, v)
 
-    BYTE ReadData(int ch) {
-        Channel& c = channels[ch];
-        BYTE ret = 0;
-        WORD target = c.latched ? c.latch_register : c.count_down;
+#define HI(a) ((a) >> 8)
+#define LO(a) ((a) & 0xFF)
 
-        if (c.access_mode == 1) {
-            ret = target & 0xFF;
-            c.latched = false;
-        }
-        else if (c.access_mode == 2) {
-            ret = (target >> 8) & 0xFF;
-            c.latched = false;
-        }
-        else if (c.access_mode == 3) {
-            if (c.read_write_state == 0) {
-                ret = target & 0xFF;
-                c.read_write_state = 1;
-            }
-            else {
-                ret = (target >> 8) & 0xFF;
-                c.read_write_state = 0;
-                c.latched = false;
-            }
-        }
-        return ret;
-    }
+SI u16 r16(u16 a) _((r8(a + 1) << 8) | r8(a))
+SI void w16(u16 a, u16 v) { w8(a, LO(v)); w8(a + 1, HI(v)); }
 
-    // --- ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ МЕТОД ОБНОВЛЕНИЯ ТАЙМЕРА ---
-    void Update(int cycles) {
-        for (int i = 0; i < 3; i++) {
-            Channel& c = channels[i];
-            if (c.access_mode == 0) continue;
-            if (!c.gate) continue;     // как в эталоне: без GATE счёт не идёт
+SI void psh(u16 v) { w16(cpu.SP -= 2, v); }
+SI u16 pop(void) _(r16((cpu.SP += 2) - 2))
 
-            // Потактовая эмуляция для корректной работы всех режимов
-            for (int t = 0; t < cycles; t++) {
-                switch (c.mode) {
-                case 0:  // Mode 0: Interrupt on Terminal Count
-                    // Линейный декремент счетчика, OUT переходит в HIGH когда count==0
-                    if (c.count_down > 0) {
-                        c.count_down--;
-                    }
-                    if (c.count_down == 0) {
-                        c.out_signal = true;
-                    }
-                    break;
+SI u8 p8(void) _(r8(cpu.PC++))
+SI u16 p16(void) _(r16((cpu.PC += 2) - 2))
 
-                case 1:  // Mode 1: Hardware Retriggerable One-Shot
-                    // Одноразовый импульс (упрощённая реализация - линейный декремент)
-                    if (c.count_down > 0) {
-                        c.count_down--;
-                    }
-                    if (c.count_down == 0) {
-                        c.out_signal = true;  // по терминальному счёту OUT возвращается в HIGH
-                    }
-                    break;
+SI void set_bc(u16 v) { cpu.B = HI(v); cpu.C = LO(v); }
+SI void set_hl(u16 v) { cpu.H = HI(v); cpu.L = LO(v); }
+SI void set_de(u16 v) { cpu.D = HI(v); cpu.E = LO(v); }
 
-                case 2:  // Mode 2: Rate Generator (Tone Generator)
-                    // Частотный генератор: импульс с частотой f/N (N = count_register)
-                    // OUT остается HIGH, падает на 1 такт перед перезагрузкой
-                    if (c.count_down > 0) {
-                        c.count_down--;
-                    }
-                    if (c.count_down == 0) {
-                        // Перезагружаем счетчик
-                        int reload = GetCountValue(c.count_register);
-                        c.count_down = reload;
-                        c.out_signal = true;  // OUT поднимается после импульса
-                    }
-                    else if (c.count_down == 1) {
-                        // На последнем такте перед обнулением OUT падает
-                        c.out_signal = false;
-                    }
-                    break;
+SI u16 get_bc(void) _((cpu.B << 8) | cpu.C)
+SI u16 get_hl(void) _((cpu.H << 8) | cpu.L)
+SI u16 get_de(void) _((cpu.D << 8) | cpu.E)
+SI u16 get_af(void) _((cpu.A << 8) | cpu.F)
 
-                case 3:  // Mode 3: Square Wave Generator (Meander)
-                    if (c.count_down > 0) {
-                        // Уменьшаем счетчик на 2 такта за шаг, так как меандр считает парами
-                        c.count_down -= 2;
-                    }
-                    if (c.count_down <= 0) {
-                        // Переключаем полярность полупериода звука/времени
-                        c.out_signal = !c.out_signal;
+// ---------------------------------------
+// INSTRUCTION IMPLEMENTATIONS
 
-                        int reload = GetCountValue(c.count_register);
-                        // Загружаем новый полупериод
-                        c.count_down = reload;
-                    }
-                    break;
+SI void inc_r(void) { cpu.RR = (cpu.RR & 0x80) | ((cpu.RR + 1) & 0x7f); }
+SI bv carry(int n, u16 a, u16 b, bv cy) _(bit(n, (a + b + cy) ^ a^ b))
 
-                case 4:  // Mode 4: Software Triggered Strobe
-                case 5:  // Mode 5: Hardware Triggered Strobe (GATE не моделируется, упрощённо как программный)
-                    if (c.count_down > 0) {
-                        c.count_down--;
-                        if (c.count_down == 1) {
-                            c.out_signal = false; // однотактный строб-импульс перед нулём
-                        }
-                    }
-                    if (c.count_down == 0) {
-                        c.out_signal = true;      // импульс окончен, счётчик останавливается (без перезагрузки)
-                    }
-                    break;
-                }
-            }
-        }
-    }
-} pit;
-
-BYTE ppi_pa, ppi_pb, ppi_pc, ppi_ctrl; //
-
-// Прямое декодирование сегментов индикатора HG1 БЕЗ ложной инверсии
-char DecodeSegment(BYTE segments) {
-    // Выделяем чистые сегменты без учета десятичной точки
-    BYTE pure_segments = segments & 0x7F;
-    char character = ' ';
-
-    switch (pure_segments) {
-    case 0x3F: character = '0'; break;
-    case 0x06: character = '1'; break;
-    case 0x5B: character = '2'; break;
-    case 0x4F: character = '3'; break;
-    case 0x66: character = '4'; break;
-    case 0x6D: character = '5'; break;
-    case 0x7D: character = '6'; break;
-    case 0x07: character = '7'; break;
-    case 0x7F: character = '8'; break;
-    case 0x6F: character = '9'; break;
-    case 0x40: character = '-'; break;
-    case 0x50: character = 'r'; break;
-    case 0x3E: character = 'U'; break;
-    case 0x79: character = 'E'; break;
-    case 0x71: character = 'F'; break;
-    case 0x76: character = 'H'; break;
-    case 0x38: character = 'L'; break;
-    case 0x73: character = 'P'; break;
-    case 0x78: character = 't'; break;
-    case 0x6E: character = 'Y'; break;
-    case 0x00: character = ' '; break;
-    case 0x77: character = 'A'; break;
-    case 0x7C: character = 'b'; break;
-    case 0x39: character = 'C'; break;
-    case 0x58: character = 'c'; break;
-    case 0x5E: character = 'd'; break;
-    case 0x3D: character = 'G'; break;
-    case 0x74: character = 'h'; break;
-    case 0x1E: character = 'J'; break;
-    case 0x54: character = 'n'; break;
-    case 0x5C: character = 'o'; break;
-    case 0x1C: character = 'u'; break;
-    case 0x08: character = '_'; break;
-    case 0x0F: character = ')'; break;
-    default: character = '?';
-    }
-
-    // Если горит старший бит (сегмент H/Dp) — возвращаем точку
-    if (segments & 0x80) {
-        if (character == ' ') return '.';
-    }
-    return character;
+SI bv parity(u8 x) {
+    x ^= x >> 4; x ^= x >> 2; x ^= x >> 1;
+    R(~x) & 1;
 }
 
-// --- ПАССИВНАЯ ФУНКЦИЯ ОБНОВЛЕНИЯ ДИСПЛЕЯ И ТРУБКИ ---
-void UpdateHardwareState() {
-    // Вычисляем активный разряд дисплея строго по схеме АОН Русь
-    if (ppi_pa & 0x08) {
-        active_digit = 0;
+SI void jmp(u16 a) { cpu.wz = cpu.PC = a; }
+SI void call(u16 dest) { psh(cpu.PC); jmp(dest); }
+
+SI bv cjmp(bv c) { u16 t = p16(); if (c) { jmp(t); R 1; } cpu.wz = t; R 0; }
+SI bv ccall(bv c) { u16 t = p16(); if (c) { call(t); R 1; } cpu.wz = t; R 0; }
+SI void ret(void) { jmp(pop()); }
+SI bv cret(bv c) { if (c) { ret(); R 1; } R 0; }
+SI void jr(i8 disp) { cpu.wz = cpu.PC += disp; }
+SI bv cjr(bv c) { if (c) { jr(p8()); R 1; } else { cpu.PC++; R 0; } }
+
+SI void xyf1(u8 x) { SET_FLAG_BIT(XF_MASK, bit(3, x)); SET_FLAG_BIT(YF_MASK, bit(5, x)); }
+SI void xyf2(u8 x) { SET_FLAG_BIT(XF_MASK, bit(3, x)); SET_FLAG_BIT(YF_MASK, bit(1, x)); }
+SI void szf8(u8 x) { SET_FLAG_BIT(ZF_MASK, x == 0); SET_FLAG_BIT(SF_MASK, x >> 7); }
+SI void szf16(u16 x) { SET_FLAG_BIT(ZF_MASK, x == 0); SET_FLAG_BIT(SF_MASK, x >> 15); }
+
+SI u8 add8(u8 a, u8 b, bv cy) {
+    u8 res = a + b + cy;
+    SET_FLAG_BIT(HF_MASK, carry(4, a, b, cy));
+    SET_FLAG_BIT(PF_MASK, carry(7, a, b, cy) != carry(8, a, b, cy));
+    SET_FLAG_BIT(CF_MASK, carry(8, a, b, cy));
+    SET_FLAG_BIT(NF_MASK, 0);
+    szf8(res); xyf1(res);
+    R res;
+}
+
+SI u8 sub8(u8 a, u8 b, bv cy) {
+    u8 v = add8(a, ~b, !cy);
+    SET_FLAG_BIT(HF_MASK, bit(4, (a - b - cy) ^ a ^ b));
+    SET_FLAG_BIT(CF_MASK, bit(8, (a - b - cy) ^ a ^ b));
+    SET_FLAG_BIT(NF_MASK, 1);
+    R v;
+}
+
+SI u16 add16(u16 a, u16 b, bv cy) {
+    u8 lo = add8((u8)a, (u8)b, cy);
+    u16 res = (add8((u8)HI(a), (u8)HI(b), GET_CF()) << 8) | lo;
+    SET_FLAG_BIT(ZF_MASK, res == 0); cpu.wz = a + 1; R res;
+}
+
+SI u16 sub16(u16 a, u16 b, bv cy) {
+    u8 lo = sub8((u8)a, (u8)b, cy);
+    u16 res = (sub8((u8)HI(a), (u8)HI(b), GET_CF()) << 8) | lo;
+    SET_FLAG_BIT(ZF_MASK, res == 0); cpu.wz = a + 1; R res;
+}
+
+SI void addhl(u16 val) {
+    bv nsf = GET_SF(), nzf = GET_ZF(), npf = GET_PF();
+    set_hl(add16(get_hl(), val, 0));
+    SET_FLAG_BIT(SF_MASK, nsf); SET_FLAG_BIT(ZF_MASK, nzf); SET_FLAG_BIT(PF_MASK, npf);
+}
+
+SI void addiz(u16* reg, u16 val) {
+    bv nsf = GET_SF(), nzf = GET_ZF(), npf = GET_PF();
+    *reg = add16(*reg, val, 0);
+    SET_FLAG_BIT(SF_MASK, nsf); SET_FLAG_BIT(ZF_MASK, nzf); SET_FLAG_BIT(PF_MASK, npf);
+}
+
+SI void adchl(u16 v) { u16 q = add16(get_hl(), v, GET_CF()); szf16(q); set_hl(q); }
+SI void sbchl(u16 v) { u16 q = sub16(get_hl(), v, GET_CF()); szf16(q); set_hl(q); }
+SI u8 inc(u8 a) { bv ncf = GET_CF(); u8 q = add8(a, 1, 0); SET_FLAG_BIT(CF_MASK, ncf); R q; }
+SI u8 dec(u8 a) { bv ncf = GET_CF(); u8 q = sub8(a, 1, 0); SET_FLAG_BIT(CF_MASK, ncf); R q; }
+
+#define bit_op(name, op, halfcarry) \
+  SI void name(u8 val) { \
+    u8 res = cpu.A op val; \
+    szf8(res); xyf1(res); \
+    SET_FLAG_BIT(HF_MASK, halfcarry); \
+    SET_FLAG_BIT(PF_MASK, parity(res)); \
+    SET_FLAG_BIT(NF_MASK, 0); SET_FLAG_BIT(CF_MASK, 0); \
+    cpu.A = res; \
+  }
+
+bit_op(land, &, 1)
+bit_op(lor, | , 0)
+bit_op(lxor, ^, 0)
+#undef bit_op
+
+SI void cmpa(u8 val) { sub8(cpu.A, val, 0); xyf1(val); }
+
+#define op_cbh(name, ...) \
+  SI u8 name(u8 val) { \
+    __VA_ARGS__ \
+    szf8(val); xyf1(val); \
+    SET_FLAG_BIT(PF_MASK, parity(val)); \
+    SET_FLAG_BIT(NF_MASK, 0); SET_FLAG_BIT(HF_MASK, 0); \
+    R val; \
+  }
+
+op_cbh(rlc, bv old = val >> 7; val = (val << 1) | old; SET_FLAG_BIT(CF_MASK, old);)
+op_cbh(rrc, bv old = val & 1; val = (val >> 1) | (old << 7); SET_FLAG_BIT(CF_MASK, old);)
+op_cbh(rl, bv ncf = GET_CF(); SET_FLAG_BIT(CF_MASK, val >> 7); val = (val << 1) | ncf;)
+op_cbh(rr, bv nc = GET_CF(); SET_FLAG_BIT(CF_MASK, val & 1); val = (val >> 1) | (nc << 7);)
+op_cbh(sla, SET_FLAG_BIT(CF_MASK, val >> 7); val <<= 1;)
+op_cbh(sll, SET_FLAG_BIT(CF_MASK, val >> 7); val <<= 1; val |= 1;)
+op_cbh(sra, SET_FLAG_BIT(CF_MASK, val & 1); val = (val >> 1) | (val & 0x80);)
+op_cbh(srl, SET_FLAG_BIT(CF_MASK, val & 1); val >>= 1;)
+
+SI u8 bt(u8 val, u8 n) {
+    u8 res = val & (1 << n);
+    szf8(res); xyf1(val);
+    SET_FLAG_BIT(HF_MASK, 1); SET_FLAG_BIT(PF_MASK, GET_ZF()); SET_FLAG_BIT(NF_MASK, 0); R res;
+}
+
+#define dbc(n) set_bc(get_bc() + (n))
+#define dhl(n) set_hl(get_hl() + (n))
+#define dde(n) set_de(get_de() + (n))
+
+SI void ldi(void) {
+    u8 val = r8(get_hl());
+    w8(get_de(), val);
+    dhl(1); dde(1); dbc(-1);
+    xyf2(val + cpu.A);
+    SET_FLAG_BIT(NF_MASK, 0); SET_FLAG_BIT(HF_MASK, 0);
+    SET_FLAG_BIT(PF_MASK, get_bc() > 0);
+}
+
+SI void ldd(void) { ldi(); dhl(-2); dde(-2); }
+
+SI void cpi(void) {
+    bv ncf = GET_CF();
+    u8 v = sub8(cpu.A, r8(get_hl()), 0);
+    dhl(1); dbc(-1);
+    xyf2(v - GET_HF());
+    SET_FLAG_BIT(PF_MASK, get_bc() != 0);
+    SET_FLAG_BIT(CF_MASK, ncf);
+    cpu.wz += 1;
+}
+
+SI void cpd(void) { cpi(); dhl(-2); cpu.wz -= 2; }
+
+SI void inr(u8* r_reg) {
+    *r_reg = InPort(get_bc());
+    szf8(*r_reg);
+    SET_FLAG_BIT(PF_MASK, parity(*r_reg));
+    SET_FLAG_BIT(NF_MASK, 0); SET_FLAG_BIT(HF_MASK, 0);
+}
+
+SI void adji(void) {
+    dhl(1);
+    SET_FLAG_BIT(ZF_MASK, --cpu.B == 0);
+    SET_FLAG_BIT(NF_MASK, 1);
+    cpu.wz = get_bc() + 1;
+}
+
+SI void ini(void) { w8(get_hl(), InPort(get_bc())); adji(); }
+SI void outi(void) { OutPort(get_bc(), r8(get_hl())); adji(); }
+SI void ind(void) { ini(); dhl(-2); cpu.wz = get_bc() - 2; }
+SI void outd(void) { outi(); dhl(-2); cpu.wz = get_bc() - 2; }
+
+SI void daa(void) {
+    u8 bcd = 0;
+    if ((cpu.A & 0x0F) > 0x09 || GET_HF()) bcd += 0x06;
+    if (cpu.A > 0x99 || GET_CF()) bcd += 0x60, SET_FLAG_BIT(CF_MASK, 1);
+    if (GET_NF()) {
+        SET_FLAG_BIT(HF_MASK, GET_HF() && (cpu.A & 0x0F) < 0x06);
+        bcd = -bcd;
     }
     else {
-        active_digit = (ppi_pa & 0x07) + 1;
+        SET_FLAG_BIT(HF_MASK, (cpu.A & 0x0F) > 0x09);
     }
-
-    int display_pos = active_digit;
-    char current_char = DecodeSegment(ir23_display_segments);
-
-    if (display_pos >= 0 && display_pos < 9) {
-        if (ir23_display_segments != 0x00 && current_char != ' ') {
-            for (int d = 0; d < 8; ++d) {
-                if (d != display_pos) {
-                    if (digit_lifetime[d] > 5) {
-                        digit_lifetime[d] = 5;
-                    }
-                }
-            }
-            display_latch[display_pos] = current_char;
-            display_digits[display_pos] = current_char;
-            digit_lifetime[display_pos] = MAX_LIFETIME;
-        }
-    }
-
-    // Синхронизируем состояние телефонной трубки (Линия С1 / PB2)
-    HWND hParent = hEditDisplay ? GetParent(hEditDisplay) : NULL;
-    HWND hCheck = hParent ? GetDlgItem(hParent, 200) : NULL;
-
-    if (hCheck) {
-        LRESULT checkState = SendMessageW(hCheck, BM_GETCHECK, 0, 0);
-        if (checkState == BST_CHECKED) {
-            ppi_pb &= ~0x04;   // Трубка ПОДНЯТА -> PB2 = 0
-        }
-        else {
-            ppi_pb |= 0x04;    // Трубка ОПУЩЕНА -> PB2 = 1
-        }
-    }
-
-    // Фиксируем символ для отладочной панели GUI
-    for (int i = 0; i < 12; i++) {
-        if (keys_pressed[i]) {
-            const wchar_t* layout = L"123456789*0#";
-            last_read_key_char = (char)layout[i];
-            break;
-        }
-    }
+    cpu.A += bcd;
+    SET_FLAG_BIT(PF_MASK, parity(cpu.A));
+    xyf1(cpu.A); szf8(cpu.A);
 }
 
-extern "C" u8 ReadByte(u16 addr) {
-    if (addr & 0x2000)
-    {
-        return ram[addr & (RAM_SIZE - 1)];
-    }
-    else
-    {
-        addr = (addr & 0x1fff) | ((addr >> 1) & 0xe000);	//translate ROM address lines
-        if (ppi_pa & 0x40) 
-            addr |= 0x8000;	//second 32K bank
-        return rom[addr & (rom_size - 1)];
-    }
+SI u16 dp(u16 b_val, i8 d_val) _(cpu.wz = b_val + d_val)
+
+// ---------------------------------------
+// EXECUTION DECODER PROTOTYPES
+
+int exec(u8 opc);
+int exec_cb(u8 opc);
+int exec_cb2(u8 opc, u16 addr);
+int exec_ed(u8 opc);
+int exec_ind(u8 opc, u16* ir);
+
+void init(void) {
+    cpu.PC = cpu.IX = cpu.IY = cpu.wz = 0;
+    cpu.SP = 0xFFFF;
+    cpu.A = 0xFF; cpu.F = 0xFF;
+    cpu.B = cpu.C = cpu.D = cpu.E = cpu.H = cpu.L = 0;
+    cpu.A_alt = cpu.B_alt = cpu.C_alt = cpu.D_alt = cpu.E_alt = cpu.H_alt = cpu.L_alt = cpu.F_alt = 0;
+    cpu.I = cpu.RR = 0;
+    cpu.iff_set = 0;
+    cpu.IM = 0;
+    cpu.IFF1 = cpu.IFF2 = 0;
+    cpu.halted = 0;
+    cpu.int_pending = cpu.nmi_pending = 0;
+    cpu.int_vec = 0;
 }
 
-extern "C" void WriteByte(u16 addr, u8 value) {
-    if (addr & 0x2000) ram[addr & (RAM_SIZE - 1)] = value;
+// ---------------------------------------
+// T-STATE (CYCLE) TABLES
+//
+// exec()/exec_ind()/exec_ed() below are built out of H(...) groups that
+// share ONE trailing "R n;" placed after the group. Because H() expands
+// to "case n: ...; break;", every one of those cases exits the switch
+// BEFORE reaching that trailing R -- it is dead code. Rather than
+// rewrite every group (very easy to get wrong by hand), each dispatch
+// function below looks its opcode's correct cost up in one of these
+// tables *before* running the switch, and returns that looked-up value
+// at the very end (replacing the function's old always-taken "R 4;"
+// fallback). Cases that already return their own value inline
+// (conditionals, IN/OUT, block instructions) are untouched and simply
+// return before ever reaching that fallback.
+//
+// Every table entry is the COMPLETE T-state cost of the instruction,
+// prefix byte(s) included. A 0 in dd_cycles/ed_cycles marks an opcode
+// that's handled by a dynamic/inline path instead (see exec_ind's
+// "default" case and exec_cb2's DDCB dispatch), so the exact value
+// there is irrelevant.
+
+static const u16 main_cycles[256] = {
+    4,10,7,6,4,4,7,4,   4,11,7,6,4,4,7,4,
+    8,10,7,6,4,4,7,4,   12,11,7,6,4,4,7,4,
+    7,10,16,6,4,4,7,4,  7,11,16,6,4,4,7,4,
+    7,10,13,6,11,11,10,4, 7,11,13,6,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    7,7,7,7,7,7,4,7,    4,4,4,4,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    4,4,4,4,4,4,7,4,    4,4,4,4,4,4,7,4,
+    5,10,10,10,10,11,7,11, 5,10,10,0,10,17,7,11,
+    5,10,10,11,10,11,7,11, 5,4,10,11,10,0,7,11,
+    5,10,10,19,10,11,7,11, 5,4,10,4,10,0,7,11,
+    5,10,10,4,10,11,7,11,  5,6,10,4,10,0,7,11,
+};
+
+static const u16 dd_cycles[256] = {
+    [0x09]=15, [0x19]=15, [0x29]=15, [0x39]=15,
+    [0x21]=14, [0x22]=20, [0x2A]=20,
+    [0x23]=10, [0x2B]=10,
+    [0x24]=8, [0x25]=8, [0x2C]=8, [0x2D]=8,
+    [0x26]=11, [0x2E]=11,
+    [0x34]=23, [0x35]=23, [0x36]=19,
+    [0x44]=8, [0x45]=8, [0x4C]=8, [0x4D]=8,
+    [0x54]=8, [0x55]=8, [0x5C]=8, [0x5D]=8,
+    [0x60]=8, [0x61]=8, [0x62]=8, [0x63]=8, [0x64]=8, [0x65]=8, [0x67]=8,
+    [0x68]=8, [0x69]=8, [0x6A]=8, [0x6B]=8, [0x6C]=8, [0x6D]=8, [0x6F]=8,
+    [0x7C]=8, [0x7D]=8,
+    [0x46]=19, [0x4E]=19, [0x56]=19, [0x5E]=19, [0x66]=19, [0x6E]=19, [0x7E]=19,
+    [0x70]=19, [0x71]=19, [0x72]=19, [0x73]=19, [0x74]=19, [0x75]=19, [0x77]=19,
+    [0x84]=8, [0x85]=8, [0x8C]=8, [0x8D]=8,
+    [0x86]=19, [0x8E]=19, [0x96]=19, [0x9E]=19,
+    [0x94]=8, [0x95]=8, [0x9C]=8, [0x9D]=8,
+    [0xA4]=8, [0xA5]=8, [0xA6]=19,
+    [0xAC]=8, [0xAD]=8, [0xAE]=19,
+    [0xB4]=8, [0xB5]=8, [0xB6]=19,
+    [0xBC]=8, [0xBD]=8, [0xBE]=19,
+    [0xE1]=14, [0xE5]=15, [0xE9]=8, [0xE3]=23, [0xF9]=10,
+};
+
+static const u16 ed_cycles[256] = {
+    [0x40]=12, [0x48]=12, [0x50]=12, [0x58]=12, [0x60]=12, [0x68]=12, [0x70]=12, [0x78]=12,
+    [0x41]=12, [0x49]=12, [0x51]=12, [0x59]=12, [0x61]=12, [0x69]=12, [0x71]=12, [0x79]=12,
+    [0x42]=15, [0x52]=15, [0x62]=15, [0x72]=15,
+    [0x4A]=15, [0x5A]=15, [0x6A]=15, [0x7A]=15,
+    [0x43]=20, [0x53]=20, [0x63]=20, [0x73]=20,
+    [0x4B]=20, [0x5B]=20, [0x6B]=20, [0x7B]=20,
+    [0x44]=8, [0x4C]=8, [0x54]=8, [0x5C]=8, [0x64]=8, [0x6C]=8, [0x74]=8, [0x7C]=8,
+    [0x45]=14, [0x55]=14, [0x65]=14, [0x75]=14, [0x5D]=14, [0x6D]=14, [0x7D]=14, [0x4D]=14,
+    [0x46]=8, [0x66]=8, [0x56]=8, [0x76]=8, [0x5E]=8, [0x7E]=8,
+    [0x47]=9, [0x4F]=9, [0x57]=9, [0x5F]=9,
+    [0x67]=18, [0x6F]=18,
+    [0xA0]=16, [0xA8]=16, [0xA1]=16, [0xA9]=16,
+    [0xB0]=16, [0xB8]=16, [0xB1]=16, [0xB9]=16,
+    [0xA2]=16, [0xAA]=16, [0xA3]=16, [0xAB]=16,
+    [0xB2]=16, [0xBA]=16, [0xB3]=16, [0xBB]=16,
+};
+
+int step(void) {
+    int cycles = 0;
+    if (cpu.halted) {
+        cycles += exec(0x00);
+    }
+    else {
+        cycles += exec(p8());
+    }
+
+    if (cpu.iff_set) {
+        cpu.iff_set = 0;
+        cpu.IFF1 = cpu.IFF2 = 1;
+        R cycles;
+    }
+
+    if (cpu.nmi_pending) {
+        cpu.nmi_pending = cpu.halted = cpu.IFF1 = 0;
+        inc_r(); call(0x66);
+        R cycles + 11;
+    }
+
+    if (cpu.int_pending && cpu.IFF1) {
+        cpu.int_pending = cpu.halted = 0;
+        cpu.IFF1 = cpu.IFF2 = 0;
+        inc_r();
+        switch (cpu.IM) {
+        case 0:
+            cycles += exec(cpu.int_vec);
+            R cycles + 2;
+        case 1:
+            call(0x38); R cycles + 13;
+        case 2:
+
+            call(r16((cpu.I << 8) | cpu.int_vec)); R cycles + 19;
+        }
+    }
+    R cycles;
 }
 
-// --- 100% ИСПРАВЛЕННАЯ СИНХРОННАЯ ФУНКЦИЯ ЧТЕНИЯ ИЗ ПОРТОВ ---
-extern "C" u8 InPort(u16 port) {
-    // Оставляем сдвиг регистра (port >> 3) для полной стабильности вашего ядра Z80
-    BYTE reg = (port >> 3) & 3;
+void gen_nmi(void) { cpu.nmi_pending = 1; }
+void gen_int(u8 data) { cpu.int_pending = 1; cpu.int_vec = data; }
 
-    // 1. Дешифрация КР580ВВ55А
-    if (!(port & 0x20)) {
-        switch (reg) {
-        case 0: return ppi_pa;
-        case 1: {
-            // Синхронизируем базовые сигналы телефонной линии (трубки)
-            UpdateHardwareState();
+// ---------------------------------------
+// DECODER BLOCKS
 
-            // AON.select = (PA&7)+1; опрос клавиатуры — БЕЗ сдвига фазы,
-            // напрямую по номеру текущего выбранного разряда (см. keyboard_poll_row()).
-            int sel = (ppi_pa & 0x07) + 1;
+#define H(n, ...) case n: __VA_ARGS__; break;
 
-            // keys_pressed[12] индексируется как "123456789*0#"
-            // {индекс клавиши для PB7 (старший бит фазы), индекс клавиши для PB6}
-            static const int row_key_idx[6][2] = {
-                {6, 0},  // sel=1: '7' -> PB7, '1' -> PB6
-                {7, 1},  // sel=2: '8' -> PB7, '2' -> PB6
-                {8, 2},  // sel=3: '9' -> PB7, '3' -> PB6
-                {9, 3},  // sel=4: '*' -> PB7, '4' -> PB6
-                {10,4},  // sel=5: '0' -> PB7, '5' -> PB6
-                {11,5}   // sel=6: '#' -> PB7, '6' -> PB6
-            };
+SI void awz1(u16 val) { cpu.wz = (cpu.A << 8) | LO(val + 1); }
 
-            BYTE row = 0;
-            if (sel >= 1 && sel <= 6) {
-                if (keys_pressed[row_key_idx[sel - 1][0]]) row |= 0x80;
-                if (keys_pressed[row_key_idx[sel - 1][1]]) row |= 0x40;
-            }
+int exec(u8 opc) {
+    u16 t1; bv t2; u8 t3;
+    u16 cyc = main_cycles[opc];
+    inc_r();
+    switch (opc) {
+    H(0x47, cpu.B=cpu.A) H(0x40, cpu.B=cpu.B) H(0x41, cpu.B=cpu.C) H(0x42, cpu.B=cpu.D) H(0x43, cpu.B=cpu.E) H(0x44, cpu.B=cpu.H) H(0x45, cpu.B=cpu.L)
+    H(0x57, cpu.D=cpu.A) H(0x50, cpu.D=cpu.B) H(0x51, cpu.D=cpu.C) H(0x52, cpu.D=cpu.D) H(0x53, cpu.D=cpu.E) H(0x54, cpu.D=cpu.H) H(0x55, cpu.D=cpu.L)
+    H(0x67, cpu.H=cpu.A) H(0x60, cpu.H=cpu.B) H(0x61, cpu.H=cpu.C) H(0x62, cpu.H=cpu.D) H(0x63, cpu.H=cpu.E) H(0x64, cpu.H=cpu.H) H(0x65, cpu.H=cpu.L)
+    H(0x4F, cpu.C=cpu.A) H(0x48, cpu.C=cpu.B) H(0x49, cpu.C=cpu.C) H(0x4A, cpu.C=cpu.D) H(0x4B, cpu.C=cpu.E) H(0x4C, cpu.C=cpu.H) H(0x4D, cpu.C=cpu.L)
+    H(0x5F, cpu.E=cpu.A) H(0x58, cpu.E=cpu.B) H(0x59, cpu.E=cpu.C) H(0x5A, cpu.E=cpu.D) H(0x5B, cpu.E=cpu.E) H(0x5C, cpu.E=cpu.H) H(0x5D, cpu.E=cpu.L)
+    H(0x6F, cpu.L=cpu.A) H(0x68, cpu.L=cpu.B) H(0x69, cpu.L=cpu.C) H(0x6A, cpu.L=cpu.D) H(0x6B, cpu.L=cpu.E) H(0x6C, cpu.L=cpu.H) H(0x6D, cpu.L=cpu.L)
+    H(0x7F, cpu.A=cpu.A) H(0x78, cpu.A=cpu.B) H(0x79, cpu.A=cpu.C) H(0x7A, cpu.A=cpu.D) H(0x7B, cpu.A=cpu.E) H(0x7C, cpu.A=cpu.H) H(0x7D, cpu.A=cpu.L)
+        R 4;
+    
+    H(0x0E, cpu.C=p8()) H(0x06, cpu.B=p8()) H(0x1E, cpu.E=p8()) H(0x16, cpu.D=p8())
+    H(0x2E, cpu.L=p8()) H(0x26, cpu.H=p8()) H(0x3E, cpu.A=p8()) 
+        R 7;
+    
+    H(0x36, w8(get_hl(),p8())) R 10;
+    
+    H(0x6E, cpu.L=r8(get_hl())) H(0x7E, cpu.A=r8(get_hl())) H(0x46, cpu.B=r8(get_hl()))
+    H(0x4E, cpu.C=r8(get_hl())) H(0x56, cpu.D=r8(get_hl())) H(0x5E, cpu.E=r8(get_hl())) H(0x66, cpu.H=r8(get_hl()))
+        R 7;
+    
+    H(0x77, w8(get_hl(),cpu.A)) H(0x70, w8(get_hl(),cpu.B)) H(0x71, w8(get_hl(),cpu.C))
+    H(0x72, w8(get_hl(),cpu.D)) H(0x73, w8(get_hl(),cpu.E)) H(0x74, w8(get_hl(),cpu.H)) H(0x75, w8(get_hl(),cpu.L))
+        R 7;
+    
+    H(0x02, w8(get_bc(),cpu.A);awz1(get_bc())) H(0x12, w8(get_de(),cpu.A);awz1(get_de()))
+    H(0x0A, cpu.A=r8(get_bc());cpu.wz=get_bc()+1) H(0x1A, cpu.A=r8(get_de());cpu.wz=get_de()+1)
+        R 7;
+        
+    H(0x32, t1=p16();w8(t1,cpu.A);awz1(t1)) H(0x3A, cpu.wz=p16()+1;cpu.A=r8(cpu.wz-1))
+        R 13;
+    
+    H(0x01, set_bc(p16())) H(0x11, set_de(p16())) H(0x21, set_hl(p16())) H(0x31, cpu.SP=p16())
+        R 10;
+    
+    H(0x2A, set_hl(r16(t1=p16()));cpu.wz=t1+1) H(0x22, w16(t1=p16(),get_hl());cpu.wz=t1+1)
+        R 16;
+    
+    H(0xF9, cpu.SP=get_hl()) R 6;
+    H(0xEB, t1=get_de();set_de(get_hl());set_hl(t1)) R 4;
+    H(0xE3, t1=r16(cpu.SP);w16(cpu.SP,get_hl());set_hl(cpu.wz=t1)) R 19;
+  
+    #define op(opc, src) case opc: cpu.A = add8(cpu.A, src, 0); break;
+    op(0x87, cpu.A) op(0x80, cpu.B) op(0x81, cpu.C) op(0x82, cpu.D) op(0x83, cpu.E) op(0x84, cpu.H) op(0x85, cpu.L)
+    #undef op
+    #define op(opc, src) case opc: cpu.A = add8(cpu.A, src, GET_CF()); break;
+    op(0x8F, cpu.A) op(0x88, cpu.B) op(0x89, cpu.C) op(0x8A, cpu.D) op(0x8B, cpu.E) op(0x8C, cpu.H) op(0x8D, cpu.L)
+    #undef op
+    #define op(opc, src) case opc: cpu.A = sub8(cpu.A, src, 0); break;
+    op(0x97, cpu.A) op(0x90, cpu.B) op(0x91, cpu.C) op(0x92, cpu.D) op(0x93, cpu.E) op(0x94, cpu.H) op(0x95, cpu.L)
+    #undef op
+    #define op(opc, src) case opc: cpu.A = sub8(cpu.A, src, GET_CF()); break;
+    op(0x9F, cpu.A) op(0x98, cpu.B) op(0x99, cpu.C) op(0x9A, cpu.D) op(0x9B, cpu.E) op(0x9C, cpu.H) op(0x9D, cpu.L)
+    #undef op
+    #define op(opA, opB, opC, opD, opE, opH, opL, name) \
+        case opA: name(cpu.A); break; case opB: name(cpu.B); break; case opC: name(cpu.C); break; \
+        case opD: name(cpu.D); break; case opE: name(cpu.E); break; case opH: name(cpu.H); break; \
+        case opL: name(cpu.L); break;
+    op(0xA7, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, land)
+    op(0xB7, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, lor)
+    op(0xAF, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, lxor)
+    op(0xBF, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, cmpa)
+    #undef op
+        R 4;
 
-            BYTE final_upper_bits = (row ^ 0xF0) & 0xF0;
-            return (ppi_pb & 0x0F) | final_upper_bits;
-        }
-        case 2: return ppi_pc;
-        case 3: return ppi_ctrl;
-        }
+    case 0x86: cpu.A = add8(cpu.A, r8(get_hl()), 0); R 7;
+    case 0x8E: cpu.A = add8(cpu.A, r8(get_hl()), GET_CF()); R 7;
+    case 0x96: cpu.A = sub8(cpu.A, r8(get_hl()), 0); R 7;
+    case 0x9E: cpu.A = sub8(cpu.A, r8(get_hl()), GET_CF()); R 7;
+    case 0xA6: land(r8(get_hl())); R 7;
+    case 0xB6: lor(r8(get_hl())); R 7;
+    case 0xAE: lxor(r8(get_hl())); R 7;
+    case 0xBE: cmpa(r8(get_hl())); R 7;
+
+    case 0xC6: cpu.A = add8(cpu.A, p8(), 0); R 7;
+    case 0xCE: cpu.A = add8(cpu.A, p8(), GET_CF()); R 7;
+    case 0xD6: cpu.A = sub8(cpu.A, p8(), 0); R 7;
+    case 0xDE: cpu.A = sub8(cpu.A, p8(), GET_CF()); R 7;
+    case 0xE6: land(p8()); R 7;
+    case 0xF6: lor(p8()); R 7;
+    case 0xEE: lxor(p8()); R 7;
+    case 0xFE: cmpa(p8()); R 7;
+  
+    H(0x09, addhl(get_bc())) H(0x19, addhl(get_de())) H(0x29, addhl(get_hl())) H(0x39, addhl(cpu.SP))
+        R 11;
+  
+    H(0xF3, cpu.IFF1=cpu.IFF2=0) H(0xFB, cpu.iff_set=1) H(0x00, ) H(0x76, cpu.halted=1)
+        R 4;
+  
+    H(0x3C, cpu.A=inc(cpu.A)) H(0x04, cpu.B=inc(cpu.B)) H(0x0C, cpu.C=inc(cpu.C)) H(0x14, cpu.D=inc(cpu.D))
+    H(0x1C, cpu.E=inc(cpu.E)) H(0x24, cpu.H=inc(cpu.H)) H(0x2C, cpu.L=inc(cpu.L))
+    H(0x3D, cpu.A=dec(cpu.A)) H(0x05, cpu.B=dec(cpu.B)) H(0x0D, cpu.C=dec(cpu.C)) H(0x15, cpu.D=dec(cpu.D))
+    H(0x1D, cpu.E=dec(cpu.E)) H(0x25, cpu.H=dec(cpu.H)) H(0x2D, cpu.L=dec(cpu.L))
+        R 4;
+  
+    H(0x34, w8(get_hl(),inc(r8(get_hl())))) H(0x35, w8(get_hl(),dec(r8(get_hl()))))
+        R 11;
+  
+    H(0x03, dbc(1)) H(0x13, dde(1)) H(0x23, dhl(1)) H(0x33, ++cpu.SP)
+    H(0x0B, dbc(-1)) H(0x1B, dde(-1)) H(0x2B, dhl(-1)) H(0x3B, --cpu.SP)
+        R 6;
+  
+    H(0x27, daa())
+    H(0x2F, cpu.A=~cpu.A; SET_FLAG_BIT(NF_MASK, 1); SET_FLAG_BIT(HF_MASK, 1); xyf1(cpu.A);)
+    H(0x37, SET_FLAG_BIT(CF_MASK, 1); SET_FLAG_BIT(NF_MASK, 0); SET_FLAG_BIT(HF_MASK, 0); xyf1(cpu.A);)
+    H(0x3F, SET_FLAG_BIT(HF_MASK, GET_CF()); SET_FLAG_BIT(CF_MASK, !GET_CF()); SET_FLAG_BIT(NF_MASK, 0); xyf1(cpu.A);)
+        R 4;
+  
+    H(0x07, t2=cpu.A>>7; cpu.A=(cpu.A<<1)|t2; SET_FLAG_BIT(CF_MASK, t2); SET_FLAG_BIT(NF_MASK,0); SET_FLAG_BIT(HF_MASK,0); xyf1(cpu.A);)
+    H(0x17, t2=GET_CF(); SET_FLAG_BIT(CF_MASK, cpu.A>>7); cpu.A=(cpu.A<<1)|t2; SET_FLAG_BIT(NF_MASK,0); SET_FLAG_BIT(HF_MASK,0); xyf1(cpu.A);)
+    H(0x0F, t2=cpu.A&1; cpu.A=(cpu.A>>1)|(t2<<7); SET_FLAG_BIT(CF_MASK, t2); SET_FLAG_BIT(NF_MASK,0); SET_FLAG_BIT(HF_MASK,0); xyf1(cpu.A);)
+    H(0x1F, t2=GET_CF(); SET_FLAG_BIT(CF_MASK, cpu.A&1); cpu.A=(cpu.A>>1)|(t2<<7); SET_FLAG_BIT(NF_MASK,0); SET_FLAG_BIT(HF_MASK,0); xyf1(cpu.A);)
+        R 4;
+  
+    H(0xC3, jmp(p16())) R 10;
+  
+    H(0xC2, cjmp(!GET_ZF())) H(0xCA, cjmp(GET_ZF()))
+    H(0xD2, cjmp(!GET_CF())) H(0xDA, cjmp(GET_CF()))
+    H(0xE2, cjmp(!GET_PF())) H(0xEA, cjmp(GET_PF()))
+    H(0xF2, cjmp(!GET_SF())) H(0xFA, cjmp(GET_SF()))
+        R 10;
+  
+    H(0x10, R cjr(--cpu.B) ? 13 : 8)
+    H(0x18, cpu.PC+=(i8)p8(); R 12)
+  
+    H(0x20, R cjr(!GET_ZF()) ? 12 : 7) H(0x28, R cjr(GET_ZF()) ? 12 : 7)
+    H(0x30, R cjr(!GET_CF()) ? 12 : 7) H(0x38, R cjr(GET_CF()) ? 12 : 7)
+  
+    H(0xE9, cpu.PC=get_hl()) R 4;
+    H(0xCD, call(p16())) R 17;
+  
+    H(0xC4, R ccall(!GET_ZF()) ? 17 : 10) H(0xCC, R ccall(GET_ZF()) ? 17 : 10)
+    H(0xD4, R ccall(!GET_CF()) ? 17 : 10) H(0xDC, R ccall(GET_CF()) ? 17 : 10)
+    H(0xE4, R ccall(!GET_PF()) ? 17 : 10) H(0xEC, R ccall(GET_PF()) ? 17 : 10)
+    H(0xF4, R ccall(!GET_SF()) ? 17 : 10) H(0xFC, R ccall(GET_SF()) ? 17 : 10)
+  
+    H(0xC9, ret()) R 10;
+  
+    H(0xC0, R cret(!GET_ZF()) ? 11 : 5) H(0xC8, R cret(GET_ZF()) ? 11 : 5)
+    H(0xD0, R cret(!GET_CF()) ? 11 : 5) H(0xD8, R cret(GET_CF()) ? 11 : 5)
+    H(0xE0, R cret(!GET_PF()) ? 11 : 5) H(0xE8, R cret(GET_PF()) ? 11 : 5)
+    H(0xF0, R cret(!GET_SF()) ? 11 : 5) H(0xF8, R cret(GET_SF()) ? 11 : 5)
+  
+    H(0xC7, call(0x00)) H(0xCF, call(0x08)) H(0xD7, call(0x10)) H(0xDF, call(0x18))
+    H(0xE7, call(0x20)) H(0xEF, call(0x28)) H(0xF7, call(0x30)) H(0xFF, call(0x38))
+        R 11;
+  
+    H(0xC5, psh(get_bc())) H(0xD5, psh(get_de())) H(0xE5, psh(get_hl())) H(0xF5, psh(get_af()))
+        R 11;
+  
+    H(0xC1, set_bc(pop())) H(0xD1, set_de(pop())) H(0xE1, set_hl(pop())) R 10;
+    H(0xF1, t1=pop(); cpu.A=t1>>8; cpu.F=t1&0xFF;) R 10;
+  
+    H(0xDB, {
+        t3 = p8(); // Сначала читаем immediate-байт n из памяти
+        u16 full_port_addr = (cpu.A << 8) | t3; // Склеиваем порт: верхний байт = A, нижний = n
+        cpu.A = InPort(full_port_addr);
+        cpu.wz = (cpu.A << 8) | (t3 + 1);
+        R 11;
+    })
+    H(0xD3, {
+        t3 = p8(); // Читаем байт порта n из памяти
+        u16 full_port_addr = (cpu.A << 8) | t3; // Верхний байт = A, нижний = n
+        OutPort(full_port_addr, cpu.A);
+        cpu.wz = ((t3 + 1) & 0xFF) | (cpu.A << 8);
+        R 11;
+        })
+
+    case 0x08: {
+        u8 na = cpu.A, nf = cpu.F;
+        cpu.A = cpu.A_alt; cpu.F = cpu.F_alt;
+        cpu.A_alt = na; cpu.F_alt = nf;
+        R 4;
     }
-
-    // 2. Дешифрация КР580ВИ53
-    if (!(port & 0x40)) {
-        if (reg != 0x03) {
-            return pit.ReadData(reg);
-        }
+    case 0xD9: {
+        u8 nb = cpu.B, nc = cpu.C, nd = cpu.D, ne = cpu.E, nh = cpu.H, nl = cpu.L;
+        cpu.B = cpu.B_alt; cpu.C = cpu.C_alt; cpu.D = cpu.D_alt; cpu.E = cpu.E_alt; cpu.H = cpu.H_alt; cpu.L = cpu.L_alt;
+        cpu.B_alt = nb; cpu.C_alt = nc; cpu.D_alt = nd; cpu.E_alt = ne; cpu.H_alt = nh; cpu.L_alt = nl;
+        R 4;
     }
-
-    return 0xFF; // Подтяжка шины к логической 1
+  
+    H(0xCB, R exec_cb(p8())) H(0xDD, R exec_ind(p8(), &cpu.IX))
+    H(0xED, R exec_ed(p8())) H(0xFD, R exec_ind(p8(), &cpu.IY))
+  
+    default: 
+        fprintf(stderr, "Unknown opcode: 0x%02X\n", opc);
+        R cyc;
+    }
+    R cyc;
 }
 
-// --- СКОРРЕКТИРОВАННАЯ ФУНКЦИЯ ЗАПИСИ В ПОРТЫ (PortOut) ---
-extern "C" void OutPort(u16 port, u8 val) {
-    // Вычисляем индекс регистра со смещением шины адреса
-    BYTE reg = (port >> 3) & 3;
-
-    // 1. Перехват порта вывода сегментов индикатора (строго по рабочему коду: if(!(adr&0x80)))
-    if (!(port & 0x80)) {
-        ir23_display_segments = val; // Маска палочек индикатора
-        UpdateHardwareState();
-        return;
+int exec_ind(u8 opc, u16 * ir) {
+    u16 t1; u16 cyc = dd_cycles[opc]; inc_r();
+    #define IHI HI(*ir)
+    #define ILO LO(*ir)
+    #define IDP dp(*ir, p8())
+  
+    switch (opc) {
+    H(0xE1, *ir = pop(); R 14) H(0xE5, psh(*ir); R 15) H(0xE9, jmp(*ir); R 8) H(0xF9, cpu.SP=*ir; R 10)
+    H(0xE3, t1=r16(cpu.SP); w16(cpu.SP,*ir); cpu.wz=*ir=t1; R 23)
+  
+    H(0x09, addiz(ir, get_bc())) H(0x19, addiz(ir, get_de()))
+    H(0x29, addiz(ir, *ir)) H(0x39, addiz(ir, cpu.SP))
+        R 15;
+  
+    H(0x84, cpu.A = add8(cpu.A, IHI, 0)) H(0x85, cpu.A = add8(cpu.A, ILO, 0))
+    H(0x8C, cpu.A = add8(cpu.A, IHI, GET_CF())) H(0x8D, cpu.A = add8(cpu.A, ILO, GET_CF()))
+    H(0x94, cpu.A = sub8(cpu.A, IHI, 0)) H(0x95, cpu.A = sub8(cpu.A, ILO, 0))
+    H(0x9C, cpu.A = sub8(cpu.A, IHI, GET_CF())) H(0x9D, cpu.A = sub8(cpu.A, ILO, GET_CF()))
+    #define op3(opA, opB, opC, f) H(opB, f(IHI)) H(opC, f(ILO))
+    op3(0xA6, 0xA4, 0xA5, land) op3(0xAE, 0xAC, 0xAD, lxor)
+    op3(0xB6, 0xB4, 0xB5, lor) op3(0xBE, 0xBC, 0xBD, cmpa)
+    #undef op3
+        R 8;
+  
+    H(0x86, cpu.A = add8(cpu.A, r8(IDP), 0)) H(0x8E, cpu.A = add8(cpu.A, r8(IDP), GET_CF()))
+    H(0x96, cpu.A = sub8(cpu.A, r8(IDP), 0)) H(0x9E, cpu.A = sub8(cpu.A, r8(IDP), GET_CF()))
+    case 0xA6: land(r8(IDP)); R 19;
+    case 0xAE: lxor(r8(IDP)); R 19;
+    case 0xB6: lor(r8(IDP)); R 19;
+    case 0xBE: cmpa(r8(IDP)); R 19;
+  
+    H(0x23, ++*ir) H(0x2B, --*ir) R 10;
+  
+    H(0x34, t1=IDP; w8(t1,inc(r8(t1)))) H(0x35, t1=IDP; w8(t1,dec(r8(t1))))
+        R 23;
+  
+    H(0x24, *ir=ILO|(inc(IHI)<<8)) H(0x25, *ir=ILO|(dec(IHI)<<8))
+    H(0x2C, *ir=(IHI<<8)|inc(ILO)) H(0x2D, *ir=(IHI<<8)|dec(ILO))
+        R 8;
+  
+    H(0x2A, *ir=r16(p16())) H(0x22, w16(p16(),*ir)) R 20;
+    H(0x21, *ir=p16()) R 14;
+    H(0x36, t1=IDP; w8(t1,p8())) R 19;
+  
+    H(0x70, w8(IDP,cpu.B)) H(0x71, w8(IDP,cpu.C)) H(0x72, w8(IDP,cpu.D))
+    H(0x73, w8(IDP,cpu.E)) H(0x74, w8(IDP,cpu.H)) H(0x75, w8(IDP,cpu.L))
+    H(0x77, w8(IDP,cpu.A))
+        R 19;
+  
+    H(0x46, cpu.B = r8(IDP)) H(0x4E, cpu.C = r8(IDP)) H(0x56, cpu.D = r8(IDP))
+    H(0x5E, cpu.E = r8(IDP)) H(0x66, cpu.H = r8(IDP)) H(0x6E, cpu.L = r8(IDP))
+    H(0x7E, cpu.A = r8(IDP))
+        R 19;
+    
+    #define op2(ob, oc, od, oe, oa, var) \
+        H(ob, cpu.B = var) H(oc, cpu.C = var) H(od, cpu.D = var) H(oe, cpu.E = var) H(oa, cpu.A = var)
+    op2(0x44, 0x4C, 0x54, 0x5C, 0x7C, IHI)
+    op2(0x45, 0x4D, 0x55, 0x5D, 0x7D, ILO)
+    #undef op2
+        R 8;
+  
+    H(0x67, *ir=ILO|(cpu.A<<8)) H(0x60, *ir=ILO|(cpu.B<<8)) H(0x61, *ir=ILO|(cpu.C<<8))
+    H(0x62, *ir=ILO|(cpu.D<<8)) H(0x63, *ir=ILO|(cpu.E<<8)) H(0x26, *ir=ILO|(p8()<<8))
+    H(0x64, ) H(0x65, *ir=(ILO<<8)|ILO)
+    H(0x6F, *ir=(IHI<<8)|cpu.A) H(0x68, *ir=(IHI<<8)|cpu.B) H(0x69, *ir=(IHI<<8)|cpu.C)
+    H(0x6A, *ir=(IHI<<8)|cpu.D) H(0x6B, *ir=(IHI<<8)|cpu.E) H(0x2E, *ir=(IHI<<8)|p8())
+    H(0x6D, ) H(0x6C, *ir=(IHI<<8)|IHI)
+        R 8;
+  
+    H(0xCB, t1=IDP; R exec_cb2(p8(),t1))
+  
+    default:
+        cpu.RR = (cpu.RR & 0x80) | ((cpu.RR - 1) & 0x7f);
+        R 4 + exec(opc);
     }
-
-    // 2. Дешифрация портов КР580ВВ55А
-    if (!(port & 0x20)) {
-        switch (reg) {
-        case 0: // Порт А: Изменение позиции индикатора
-            ppi_pa = val;
-            UpdateHardwareState();
-            break;
-
-        case 1: // Порт B
-            ppi_pb = val;
-            break;
-
-        case 2: // Порт C: Звук и сканирование строк кнопок
-            ppi_pc = val;
-            // Синхронизация системного звука АОН
-            rk_port_c_speaker_state = (val & 0x02) ? true : false;
-            UpdateHardwareState();
-            break;
-
-        case 3: // Регистр Управляющего Слова (РУС)
-            ppi_ctrl = val;
-            UpdateHardwareState();
-            break;
-        }
-        return;
-    }
-
-    // 3. Дешифрация КР580ВИ53
-    if (!(port & 0x40)) {
-        if (reg == 0x03) {
-            pit.WriteControl(val);
-        }
-        else {
-            pit.WriteData(reg, val);
-        }
-        return;
-    }
+    #undef IDP
+    #undef ILO
+    #undef IHI
+    R cyc;
 }
 
-void Reset() {
-    cpu.init();
-    // Аппаратный /RES сбрасывает и КР580ВВ55А — обязательно возвращаем
-    // выбор банка ПЗУ (PA6) и остальные защёлки портов в исходное состояние,
-    // иначе повторный Reset() с 64 КБ ПЗУ прочитает вектор сброса из "зависшего" банка.
-    ppi_pa = 0;
-    ppi_pb = 0;
-    ppi_pc = 0;
-    ppi_ctrl = 0;
-
-    // Очищаем ОЗУ
-    for (int i = 0; i < 8192; ++i) {
-        ram[i] = rand() & 255;
+int exec_cb(u8 opc) {
+    inc_r();
+    u8 dk = (opc >> 6) & 0b11; u8 da = (opc >> 3) & 0b111; u8 dr = opc & 0b111; 
+    u8 hlr = 0; u8* reg = 0;
+  
+    switch (dr) {
+    H(0,reg=&cpu.B) H(1,reg=&cpu.C) H(2,reg=&cpu.D) H(3,reg=&cpu.E) H(4,reg=&cpu.H)
+    H(5,reg=&cpu.L) H(6, hlr=r8(get_hl());reg=&hlr) H(7,reg=&cpu.A)
     }
-}
-
-static const int KeyAddressMap[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-
-LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    int id = GetWindowLongPtrW(hwnd, GWLP_ID) - 100;
-    if (id >= 0 && id < 12) {
-        int hw_address = KeyAddressMap[id];
-        if (msg == WM_LBUTTONDOWN) { keys_pressed[hw_address] = true; UpdateHardwareState(); }
-        else if (msg == WM_LBUTTONUP) { keys_pressed[hw_address] = false; UpdateHardwareState(); }
-    }
-    return CallWindowProcW(OldButtonProc, hwnd, msg, wParam, lParam);
-}
-
-bool LoadROM(const wchar_t* filename) {
-    FILE* f = NULL;
-    if (_wfopen_s(&f, filename, L"rb") != 0 || !f) return false;
-    fseek(f, 0, SEEK_END);
-    loaded_rom_file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (loaded_rom_file_size <= 0) { fclose(f); return false; }
-
-    fread(rom, 1, loaded_rom_file_size, f);
-    fclose(f);
-    rom_size = loaded_rom_file_size;
-    return true;
-}
-
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-    case WM_CREATE: {
-        hEditDisplay = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L" ",
-            WS_CHILD | WS_VISIBLE | ES_READONLY | ES_CENTER, 20, 20, 340, 40, hwnd, NULL, NULL, NULL);
-        HFONT hFontDisp = CreateFontW(28, 0, 0, 0, FW_BOLD, FALSE,
-            FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECISION, CLIP_DEFAULT_PRECISION,
-            CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Courier New");
-        SendMessageW(hEditDisplay, WM_SETFONT, (WPARAM)hFontDisp, TRUE);
-        hEditDebug = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_READONLY | ES_MULTILINE, 380, 20, 240, 310, hwnd, NULL, NULL, NULL);
-        HFONT hFontDebug = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE,
-            FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECISION, CLIP_DEFAULT_PRECISION,
-            CLEARTYPE_QUALITY, FIXED_PITCH, L"Courier New");
-        SendMessageW(hEditDebug, WM_SETFONT, (WPARAM)hFontDebug, TRUE);
-        hEditRAM_Low = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_READONLY | ES_MULTILINE | WS_VSCROLL, 20, 385, 600, 150, hwnd, NULL, NULL, NULL);
-        SendMessageW(hEditRAM_Low, WM_SETFONT, (WPARAM)hFontDebug, TRUE);
-        hEditRAM = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_READONLY | ES_MULTILINE | WS_VSCROLL, 20, 550, 600, 120, hwnd, NULL, NULL, NULL);
-        SendMessageW(hEditRAM, WM_SETFONT, (WPARAM)hFontDebug, TRUE);
-        const wchar_t* keyLabels[] = { L"1", L"2", L"3", L"4", L"5", L"6", L"7", L"8", L"9", L"*", L"0", L"#" };
-        int btnIndex = 0;
-        for (int r = 0; r < 4; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                hBtnKeys[btnIndex] = CreateWindowW(L"BUTTON",
-                    keyLabels[btnIndex], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 20 + c * 113, 80 + r * 50, 100, 40, hwnd, (HMENU)(INT_PTR)(100 + btnIndex), NULL, NULL);
-                if (OldButtonProc == NULL) OldButtonProc =
-                    (WNDPROC)SetWindowLongPtrW(hBtnKeys[btnIndex], GWLP_WNDPROC, (LONG_PTR)ButtonSubclassProc);
-                else SetWindowLongPtrW(hBtnKeys[btnIndex],
-                    GWLP_WNDPROC, (LONG_PTR)ButtonSubclassProc);
-                btnIndex++;
-            }
+  
+    switch (dk) {
+    case 0:
+        switch (da) {
+        #define op(n,f) case n: *reg = f(*reg); break;
+        op(0, rlc) op(1, rrc) op(2, rl) op(3, rr)
+        op(4, sla) op(5, sra) op(6, sll) op(7, srl)
+        #undef op
         }
-        HWND hCheckC1Init = CreateWindowW(L"BUTTON", L"Трубка поднята (Линия С1)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 20, 285, 340, 20, hwnd, (HMENU)200, NULL, NULL);
-        // Вместо BST_CHECKED ставим BST_UNCHECKED, чтобы при старте трубка лежала:
-        SendMessageW(hCheckC1Init, BM_SETCHECK, BST_UNCHECKED, 0);
-        CreateWindowW(L"BUTTON", L"Аппаратный сброс (RESET Z80)",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 20, 335, 340, 35, hwnd, (HMENU)202, NULL, NULL);
-        timerId = SetTimer(hwnd, 1, 20, NULL);
         break;
+    case 1:
+        bt(*reg, da); if (dr == 6) xyf1(HI(cpu.wz));
+        break;
+    H(2, *reg&=~(1<<da)) H(3, *reg|=1<<da)
     }
-    case WM_COMMAND: {
-        int wmId = LOWORD(wParam);
-        // Перехватываем клик по нашему чекбоксу трубки (ID = 200)
-        if (wmId == 200) {
-            // Сразу же синхронизируем состояние железа АОН, не дожидаясь таймера
-            UpdateHardwareState();
-        }
-        else if (wmId == 202) {
-            Reset(); last_read_key_char = L'-';
-            for (int d = 0; d < 8; ++d) { display_digits[d] = ' '; display_latch[d] = ' '; digit_lifetime[d] = 0; }
-            UpdateHardwareState();
-            SetFocus(hwnd);
+  
+    if (reg == &hlr) { w8(get_hl(), hlr); R (dk == 1) ? 12 : 15; }
+    R 8;
+}
+
+int exec_cb2(u8 opc, u16 addr) {
+    u8 val = r8(addr); u8 res = 0;
+    u8 dk = (opc >> 6) & 0b11; u8 da = (opc >> 3) & 0b111; u8 dr = opc & 0b111; 
+  
+    switch (dk) {
+    case 0:
+        switch (da) {
+        #define op(n,f) case n: res = f(val); break;
+        op(0, rlc) op(1, rrc) op(2, rl) op(3, rr)
+        op(4, sla) op(5, sra) op(6, sll) op(7, srl)
+        #undef op
         }
         break;
-    }
-    case WM_TIMER: {
-        if (wParam == 1) {
-            wchar_t debugBuf[1024]; // Увеличили буфер под расширенную отладку
-
-            int final_direct_code = -1;
-            for (int i = 0; i < 12; i++) {
-                if (keys_pressed[i]) { final_direct_code = i; break; }
-            }
-
-            wchar_t gui_key_str[32];
-            if (final_direct_code != -1) swprintf_s(gui_key_str, 32, L"0x%02X", final_direct_code);
-            else swprintf_s(gui_key_str, 32, L"-");
-
-            // Извлекаем текущие значения обратного отсчета для всех трех каналов DD8
-            WORD ch0 = pit.channels[0].count_down;
-            WORD ch1 = pit.channels[1].count_down;
-            WORD ch2 = pit.channels[2].count_down;
-
-            // --- ОБНОВЛЕННЫЙ ПАНЕЛЬНЫЙ ДИСПЛЕЙ ОТЛАДКИ ---
-            swprintf_s(debugBuf, 1024,
-                L"--- Z80 REGISTERS ---\r\nA: 0x%02X F: 0x%02X\r\nBC: 0x%02X%02X\r\nDE: 0x%02X%02X\r\nHL: 0x%02X%02X\r\nSP: 0x%04X PC: 0x%04X\r\nIX: 0x%04X IY: 0x%04X\r\n\r\n"
-                L"--- STATE ---\r\nIM MODE: %d\r\nGUI_KEY: %s\r\n\r\n"
-                L"--- PIT КР580ВИ53 ---\r\n"
-                L"CH0 (Звук/Время): 0x%04X (Out: %s)\r\n"
-                L"CH1 (Системный):  0x%04X\r\n"
-                L"CH2 (АON-Прием):  0x%04X",
-                cpu.A, cpu.F, cpu.B, cpu.C, cpu.D, cpu.E, cpu.H, cpu.L, cpu.SP, cpu.PC, cpu.IX, cpu.IY,
-                cpu.IM, gui_key_str,
-                ch0, vi53_out0_state ? L"HIGH" : L"LOW", ch1, ch2);
-            SetWindowTextW(hEditDebug, debugBuf);
-
-            // Плавное послесвечение сегментов
-            for (int d = 0; d < 8; ++d) {
-                if (digit_lifetime[d] > 0) digit_lifetime[d]--;
-                else display_digits[d] = ' ';
-            }
-
-            wchar_t textBuf[64];
-            swprintf_s(textBuf, 64, L"[ %c%c%c%c%c%c%c%c ]",
-                display_digits[0], display_digits[1], display_digits[2], display_digits[3],
-                display_digits[4], display_digits[5], display_digits[6], display_digits[7]);
-            SetWindowTextW(hEditDisplay, textBuf);
-        }
+    case 1:
+        res = bt(val, da); xyf1(HI(addr));
         break;
+    H(2, res=val&~(1<<da)) H(3, res=val|(1<<da))
+    default: fprintf(stderr, "Invalid IX/IY CB-prefixed opcode: %02X\n", opc);
     }
-    case WM_DESTROY: KillTimer(hwnd, timerId); PostQuitMessage(0); break;
-    default: return DefWindowProcW(hwnd, msg, wParam, lParam);
-    }
-    return 0;
+  
+    if (dk != 1 && dr != 6)
+        switch (dr) {
+        H(0, cpu.B=res) H(1, cpu.C=res) H(2, cpu.D=res) H(3, cpu.E=res)
+        H(4, cpu.H=res) H(5, cpu.L=res) H(6, w8(get_hl(), res)) H(7, cpu.A=res)
+        }
+    if (dk != 1) w8(addr, res);
+    R (dk == 1) ? 20 : 23;
 }
 
-const double PIT_CLOCK_HZ = 875000.0; // = SYSTEM_CLOCK_HZ / 4, см. aon_update() в эталоне
-const double TICKS_PER_SAMPLE = 3500000.0 / (double)AUDIO_SAMPLE_RATE; // audio_ticks_accumulator считает такты Z80 (3.5 МГц), а не такты ВИ53 (875 кГц)!
-
-void FillAudioBuffer(short* buffer, int samplesCount) {
-    for (int i = 0; i < samplesCount; i++) {
-        if (inte_ring_read_ptr != inte_ring_write_ptr) {
-            buffer[i] = inte_ring_buffer[inte_ring_read_ptr];
-            inte_ring_read_ptr = (inte_ring_read_ptr + 1) % INTE_RING_BUF_SIZE;
-        }
-        else {
-            int inte_part = rk_inte_speaker_state ? 3000 : -3000;
-            int port_c_part = rk_port_c_speaker_state ? 3000 : -3000;
-            int vi53_part = vi53_out0_state ? 2000 : -2000;
-            buffer[i] = (short)((inte_part + port_c_part + vi53_part) / 2);
-        }
-    }
+SI void rot_ep(void) {
+    SET_FLAG_BIT(NF_MASK, 0); SET_FLAG_BIT(HF_MASK, 0);
+    xyf1(cpu.A); szf8(cpu.A);
+    SET_FLAG_BIT(PF_MASK, parity(cpu.A));
+    cpu.wz = get_hl() + 1;
 }
 
-void CALLBACK WaveOutCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
-    if (uMsg == WOM_DONE) {
-        WAVEHDR* pHdr = (WAVEHDR*)dwParam1;
-        FillAudioBuffer((short*)pHdr->lpData, AUDIO_BUF_SIZE);
-        waveOutWrite(hwo, pHdr, sizeof(WAVEHDR));
+int exec_ed(u8 opc) {
+    u8 t1; u16 t2; u16 cyc = ed_cycles[opc]; inc_r();
+    switch (opc) {
+    H(0x47, cpu.I=cpu.A) H(0x4F, cpu.RR=cpu.A)
+    H(0x57, cpu.A=cpu.I; szf8(cpu.A); SET_FLAG_BIT(HF_MASK,0); SET_FLAG_BIT(NF_MASK,0); SET_FLAG_BIT(PF_MASK,cpu.IFF2);)
+    H(0x5F, cpu.A=cpu.RR; szf8(cpu.A); SET_FLAG_BIT(HF_MASK,0); SET_FLAG_BIT(NF_MASK,0); SET_FLAG_BIT(PF_MASK,cpu.IFF2);)
+        R 9;
+  
+    case 0x45: case 0x55: case 0x65: case 0x75:
+    case 0x5D: case 0x6D: case 0x7D:
+        cpu.IFF1 = cpu.IFF2; ret(); R 14;
+    H(0x4D, ret()) R 14;
+  
+    case 0xA0: ldi(); R 16;
+    case 0xA8: ldd(); R 16;
+    case 0xA1: cpi(); R 16;
+    case 0xA9: cpd(); R 16;
+  
+    case 0xB0: ldi(); if(get_bc()) { cpu.wz=--cpu.PC; --cpu.PC; R 21; } R 16;
+    case 0xB8: ldd(); if(get_bc()) { cpu.wz=--cpu.PC; --cpu.PC; R 21; } R 16;
+    case 0xB1: cpi(); if(get_bc()&&!GET_ZF()) { cpu.wz=--cpu.PC; --cpu.PC; R 21; } else { ++cpu.wz; R 16; }
+    case 0xB9: cpd(); if(get_bc()&&!GET_ZF()) { cpu.PC-=2; R 21; } else { ++cpu.wz; R 16; }
+  
+    H(0x40, inr(&cpu.B)) H(0x48, inr(&cpu.C)) H(0x50, inr(&cpu.D)) H(0x58, inr(&cpu.E))
+    H(0x60, inr(&cpu.H)) H(0x68, inr(&cpu.L)) H(0x70, inr(&t1)) H(0x78, inr(&cpu.A); cpu.wz=get_bc()+1)
+    H(0x41, OutPort(get_bc(), cpu.B)) H(0x49, OutPort(get_bc(), cpu.C)) H(0x51, OutPort(get_bc(), cpu.D))
+    H(0x59, OutPort(get_bc(), cpu.E)) H(0x61, OutPort(get_bc(), cpu.H)) H(0x69, OutPort(get_bc(), cpu.L))
+    H(0x71, OutPort(get_bc(), 0)) H(0x79, OutPort(get_bc(),cpu.A); cpu.wz=get_bc()+1)
+        R 12;
+  
+    case 0xA2: ini(); R 16;
+    case 0xAA: ind(); R 16;
+    case 0xA3: outi(); R 16;
+    case 0xAB: outd(); R 16;
+  
+    case 0xB2: ini(); if(cpu.B) { cpu.PC-=2; R 21; } R 16;
+    case 0xBA: ind(); if(cpu.B) { cpu.PC-=2; R 21; } R 16;
+    case 0xB3: outi(); if(cpu.B) { cpu.PC-=2; R 21; } R 16;
+    case 0xBB: outd(); if(cpu.B) { cpu.PC-=2; R 21; } R 16;
+  
+    H(0x42, sbchl(get_bc())) H(0x52, sbchl(get_de())) H(0x62, sbchl(get_hl())) H(0x72, sbchl(cpu.SP))
+    H(0x4A, adchl(get_bc())) H(0x5A, adchl(get_de())) H(0x6A, adchl(get_hl())) H(0x7A, adchl(cpu.SP))
+        R 15;
+  
+    H(0x43, w16(t2=p16(),get_bc());cpu.wz=t2+1) H(0x53, w16(t2=p16(),get_de());cpu.wz=t2+1)
+    H(0x63, w16(t2=p16(),get_hl());cpu.wz=t2+1) H(0x73, w16(t2=p16(),cpu.SP);cpu.wz=t2+1)
+    H(0x4B, set_bc(r16(t2=p16()));cpu.wz=t2+1) H(0x5B, set_de(r16(t2=p16()));cpu.wz=t2+1)
+    H(0x6B, set_hl(r16(t2=p16()));cpu.wz=t2+1) H(0x7B, cpu.SP = r16(t2=p16());cpu.wz=t2+1)
+        R 20;
+  
+    case 0x44: case 0x54: case 0x64: case 0x74:
+    case 0x4C: case 0x5C: case 0x6C: case 0x7C:
+        cpu.A = sub8(0, cpu.A, 0); R 8;
+  
+    case 0x46: case 0x66: cpu.IM = 0; R 8;
+    case 0x56: case 0x76: cpu.IM = 1; R 8;
+    case 0x5E: case 0x7E: cpu.IM = 2; R 8;
+  
+    case 0x67: {
+        u8 na = cpu.A, val = r8(get_hl());
+        cpu.A = (na & 0xF0) | (val & 0xF); w8(get_hl(), (val >> 4) | (na << 4));
+        rot_ep(); R 18;
     }
+    case 0x6F: {
+        u8 na = cpu.A, val = r8(get_hl());
+        cpu.A = (na & 0xF0) | (val >> 4); w8(get_hl(), (val << 4) | (na & 0xF));
+        rot_ep(); R 18;
+    }
+  
+    default:
+        // Все недокументированные opc в диапазонах 0x00-0x3F и 0x80-0xFF 
+        // работают как NOP, длятся 8 тактов. Регистр R уже инкрементирован 
+        // функцией inc_r() в начале exec_ed.
+        if (opc <= 0x3F || opc >= 0x80) {
+            R 8;
+        }
+
+        // На случай, если пропущена какая-то редкая недокументированная команда из диапазона 0x40-0x7F
+        fprintf(stderr, "unknown ED opcode: %02X\n", opc);
+        R cyc;
+    }
+    R cyc;
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    if (!LoadROM(L"rom.bin")) {
-        MessageBoxW(NULL, L"Файл прошивки ПЗУ Z80 'rom.bin' не найден!", L"Внимание", MB_OK | MB_ICONWARNING);
-    }
-    Reset();
-    WNDCLASSEXW wc = { 0 };
-    wc.cbSize = sizeof(WNDCLASSEXW); wc.lpfnWndProc = WndProc; wc.hInstance = hInstance;
-    wc.hCursor = LoadCursorW(NULL, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.lpszClassName = L"Z80AONSimulatorClass";
-    if (!RegisterClassExW(&wc)) return 0;
-    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT,
-        L"Z80AONSimulatorClass", L"Симулятор АОН на базе Z80 / КР580ВИ53", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 660, 735, NULL, NULL, hInstance, NULL);
-    if (!hwnd) return 0;
-    ShowWindow(hwnd, nCmdShow); UpdateWindow(hwnd);
-    WAVEFORMATEX wfx = { 0 };
-    wfx.wFormatTag = WAVE_FORMAT_PCM; wfx.nChannels = 1; wfx.nSamplesPerSec = AUDIO_SAMPLE_RATE; wfx.wBitsPerSample = 16;
-    wfx.nBlockAlign = 2; wfx.nAvgBytesPerSec = AUDIO_SAMPLE_RATE * 2;
-    if (waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, (DWORD_PTR)WaveOutCallback, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR) {
-        for (int i = 0; i < 2; i++) {
-            audioBuffers[i] = new short[AUDIO_BUF_SIZE];
-            memset(audioBuffers[i], 0, AUDIO_BUF_SIZE * sizeof(short));
-            waveHeader[i].lpData = (LPSTR)audioBuffers[i];
-            waveHeader[i].dwBufferLength = AUDIO_BUF_SIZE * sizeof(short);
-            waveHeader[i].dwFlags = 0;
-            waveOutPrepareHeader(hWaveOut, &waveHeader[i], sizeof(WAVEHDR));
-            waveOutWrite(hWaveOut, &waveHeader[i], sizeof(WAVEHDR));
-        }
-    }
-    MSG msg;
-    LARGE_INTEGER frequency, last_hardware_time;
-    double internal_cycles_debt = 0.0;
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&last_hardware_time);
-    const double SYSTEM_CLOCK_HZ = 3500000.0;
-    static double pit_ticks_accumulator = 0.0;
-    static double audio_ticks_accumulator = 0.0;
-    static bool last_ch0_out_state = true; // прерывание берётся с CT_0 ("Звук/Время"), не с CT_1
 
-    while (emulator_running) {
-        MsgWaitForMultipleObjectsEx(0, NULL, 1, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) { emulator_running = false; break; }
-            TranslateMessage(&msg); DispatchMessageW(&msg);
-        }
-        if (!emulator_running) break;
-
-        LARGE_INTEGER current_hardware_time;
-        QueryPerformanceCounter(&current_hardware_time);
-        double elapsed_seconds = (double)(current_hardware_time.QuadPart - last_hardware_time.QuadPart) / frequency.QuadPart;
-
-        if (elapsed_seconds > 0.1) elapsed_seconds = 0.1;
-        if (elapsed_seconds > 0.0) {
-            last_hardware_time = current_hardware_time;
-            internal_cycles_debt += elapsed_seconds * SYSTEM_CLOCK_HZ;
-            int cycles_to_execute = (int)internal_cycles_debt;
-            internal_cycles_debt -= cycles_to_execute;
-
-            while (cycles_to_execute > 0) {
-                int slice = (cycles_to_execute > 2000) ? 2000 : cycles_to_execute;
-                cycles_to_execute -= slice;
-
-                while (slice > 0) {
-                    // 1. Процессор делает один шаг и возвращает количество потраченных тактов Z80
-                    int elapsed_ticks = cpu.step();
-                    slice -= elapsed_ticks;
-                    audio_ticks_accumulator += elapsed_ticks;
-
-                    // 2. Масштабируем такты Z80 (3.5 МГц) в такты таймера КР580ВИ53 (0.85 МГц)
-                    pit_ticks_accumulator += (double)elapsed_ticks * 0.25; // PIT_CLK = CPU_CLK / 2
-                    if (pit_ticks_accumulator >= 1.0) {
-                        int pit_ticks_to_update = (int)pit_ticks_accumulator;
-                        pit_ticks_accumulator -= pit_ticks_to_update;
-
-                        // Тактуем исправленный таймер пошагово для ловли фронтов прерываний
-                        for (int p = 0; p < pit_ticks_to_update; p++) {
-                            pit.channels[0].gate = true;                          // CT0 GATE -> +5В
-                            pit.channels[1].gate = (ppi_pa & 0x40) != 0;      // CT1 GATE = PA6
-                            pit.channels[2].gate = (ppi_pa & 0x80) != 0;      // CT2 GATE = PA7
-
-                            bool prev_ch0_out = pit.channels[0].out_signal;
-
-                            // Обновляем таймер ровно на 1 такт периферии
-                            pit.Update(1);
-
-                            // Маскируемое прерывание /INT генерируется строго по КАЖДОМУ изменению (фронту/спаду) OUT0
-                            if (prev_ch0_out != pit.channels[0].out_signal) {
-                                cpu.int_pending = true;
-                            }
-                        }
-                    }
-
-                    // 3. ПОЛНЫЙ БЛОК ОБРАБОТКИ АУДИО (Запрос из предыдущего шага)
-                    while (audio_ticks_accumulator >= TICKS_PER_SAMPLE) {
-                        audio_ticks_accumulator -= TICKS_PER_SAMPLE;
-
-                        // Извлекаем состояние выхода Канала 0 ВИ53 (Звук)
-                        // Вместо: vi53_out0_state = pit.channels[0].out_signal;
-                        // Пишем правильную логику звука АОН:
-                        if (ppi_pa & 0x10) { // PPI8255_PORTA, PIN_D4 (Звук)
-                            vi53_out0_state = pit.channels[2].out_signal;
-                        }
-                        else {
-                            vi53_out0_state = false; // Звук выключен прошивкой
-                        }
-
-                        int inte_part = rk_inte_speaker_state ? 3000 : -3000;
-                        int port_c_part = rk_port_c_speaker_state ? 3000 : -3000;
-                        int vi53_part = vi53_out0_state ? 2000 : -2000;
-
-                        short audio_sample = (short)((inte_part + port_c_part + vi53_part) / 2);
-
-                        int next_write = (inte_ring_write_ptr + 1) % INTE_RING_BUF_SIZE;
-                        if (next_write != inte_ring_read_ptr) {
-                            inte_ring_buffer[inte_ring_write_ptr] = audio_sample;
-                            inte_ring_write_ptr = next_write;
-                        }
-                    }
-                }
-            }
-        }
-        if (internal_cycles_debt <= 0.0) Sleep(1);
-    }
-    if (hWaveOut) {
-        for (int i = 0; i < 2; i++) { waveOutUnprepareHeader(hWaveOut, &waveHeader[i], sizeof(WAVEHDR)); delete[] audioBuffers[i]; }
-        waveOutClose(hWaveOut);
-    }
-    return (int)msg.wParam;
-}
-
+#undef bit
+#undef H
+#undef HI
+#undef LO

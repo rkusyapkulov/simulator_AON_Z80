@@ -599,16 +599,18 @@ int exec(u8 opc) {
     H(0xF1, t1=pop(); cpu.A=t1>>8; cpu.F=t1&0xFF;) R 10;
   
     H(0xDB, {
-        t3 = p8(); 
-        t2 = (cpu.A << 8) | t3; 
-        cpu.A = InPort(t2);
+        u16 full_port_addr;
+        t3 = p8();
+        full_port_addr = (cpu.A << 8) | t3;
+        cpu.A = InPort(full_port_addr);
         cpu.wz = (cpu.A << 8) | (t3 + 1);
         R 11;
     })
     H(0xD3, {
-        t3 = p8(); 
-        t2 = (cpu.A << 8) | t3; 
-        OutPort(t2, cpu.A);
+        u16 full_port_addr;
+        t3 = p8();
+        full_port_addr = (cpu.A << 8) | t3;
+        OutPort(full_port_addr, cpu.A);
         cpu.wz = ((t3 + 1) & 0xFF) | (cpu.A << 8);
         R 11;
     })

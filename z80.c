@@ -1,8 +1,16 @@
 ﻿#include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdio.h>
-#include <stdbool.h> // Обеспечивает полную совместимость bool между C и C++
+
+#if defined(_MSC_VER) && _MSC_VER < 1800
+    /* VS2010/2012 не имеют <stdbool.h> (появился в VS2013) */
+	#define inline __inline
+    typedef unsigned char bool;
+    #define true 1
+    #define false 0
+#else
+    #include <stdbool.h>
+#endif
 
 // ---------------------------------------
 // ABBREVIATIONS & TYPES
@@ -15,11 +23,8 @@ typedef bool bv;
 #define SI static inline
 #define R return
 
-// Defining a single-expression function body.
-// Equivalent declarations:
-// u8 f(u8 a)_(a * 2)
-// u8 f(u8 a) { return a * 2; }
-#define _(...) { return (__VA_ARGS__); }
+// Безопасное переименование макроса одиночного выражения для VS2010
+#define _R(...) { return (__VA_ARGS__); }
 
 // ---------------------------------------
 // GLOBAL CPU STRUCTURE DEFINITION
@@ -89,29 +94,29 @@ void gen_int(u8 data);
 #define HI(a) ((a) >> 8)
 #define LO(a) ((a) & 0xFF)
 
-SI u16 r16(u16 a) _((r8(a + 1) << 8) | r8(a))
+SI u16 r16(u16 a) _R((r8(a + 1) << 8) | r8(a))
 SI void w16(u16 a, u16 v) { w8(a, LO(v)); w8(a + 1, HI(v)); }
 
 SI void psh(u16 v) { w16(cpu.SP -= 2, v); }
-SI u16 pop(void) _(r16((cpu.SP += 2) - 2))
+SI u16 pop(void) _R(r16((cpu.SP += 2) - 2))
 
-SI u8 p8(void) _(r8(cpu.PC++))
-SI u16 p16(void) _(r16((cpu.PC += 2) - 2))
+SI u8 p8(void) _R(r8(cpu.PC++))
+SI u16 p16(void) _R(r16((cpu.PC += 2) - 2))
 
 SI void set_bc(u16 v) { cpu.B = HI(v); cpu.C = LO(v); }
 SI void set_hl(u16 v) { cpu.H = HI(v); cpu.L = LO(v); }
 SI void set_de(u16 v) { cpu.D = HI(v); cpu.E = LO(v); }
 
-SI u16 get_bc(void) _((cpu.B << 8) | cpu.C)
-SI u16 get_hl(void) _((cpu.H << 8) | cpu.L)
-SI u16 get_de(void) _((cpu.D << 8) | cpu.E)
-SI u16 get_af(void) _((cpu.A << 8) | cpu.F)
+SI u16 get_bc(void) _R((cpu.B << 8) | cpu.C)
+SI u16 get_hl(void) _R((cpu.H << 8) | cpu.L)
+SI u16 get_de(void) _R((cpu.D << 8) | cpu.E)
+SI u16 get_af(void) _R((cpu.A << 8) | cpu.F)
 
 // ---------------------------------------
 // INSTRUCTION IMPLEMENTATIONS
 
 SI void inc_r(void) { cpu.RR = (cpu.RR & 0x80) | ((cpu.RR + 1) & 0x7f); }
-SI bv carry(int n, u16 a, u16 b, bv cy) _(bit(n, (a + b + cy) ^ a^ b))
+SI bv carry(int n, u16 a, u16 b, bv cy) _R(bit(n, (a + b + cy) ^ a^ b))
 
 SI bv parity(u8 x) {
     x ^= x >> 4; x ^= x >> 2; x ^= x >> 1;
@@ -283,7 +288,7 @@ SI void daa(void) {
     xyf1(cpu.A); szf8(cpu.A);
 }
 
-SI u16 dp(u16 b_val, i8 d_val) _(cpu.wz = b_val + d_val)
+SI u16 dp(u16 b_val, i8 d_val) _R(cpu.wz = b_val + d_val)
 
 // ---------------------------------------
 // EXECUTION DECODER PROTOTYPES
@@ -349,46 +354,44 @@ static const u16 main_cycles[256] = {
     5,10,10,4,10,11,7,11,  5,6,10,4,10,0,7,11,
 };
 
+// Полная таблица тактов для префикса DD, адаптированная под VS2010
 static const u16 dd_cycles[256] = {
-    [0x09]=15, [0x19]=15, [0x29]=15, [0x39]=15,
-    [0x21]=14, [0x22]=20, [0x2A]=20,
-    [0x23]=10, [0x2B]=10,
-    [0x24]=8, [0x25]=8, [0x2C]=8, [0x2D]=8,
-    [0x26]=11, [0x2E]=11,
-    [0x34]=23, [0x35]=23, [0x36]=19,
-    [0x44]=8, [0x45]=8, [0x4C]=8, [0x4D]=8,
-    [0x54]=8, [0x55]=8, [0x5C]=8, [0x5D]=8,
-    [0x60]=8, [0x61]=8, [0x62]=8, [0x63]=8, [0x64]=8, [0x65]=8, [0x67]=8,
-    [0x68]=8, [0x69]=8, [0x6A]=8, [0x6B]=8, [0x6C]=8, [0x6D]=8, [0x6F]=8,
-    [0x7C]=8, [0x7D]=8,
-    [0x46]=19, [0x4E]=19, [0x56]=19, [0x5E]=19, [0x66]=19, [0x6E]=19, [0x7E]=19,
-    [0x70]=19, [0x71]=19, [0x72]=19, [0x73]=19, [0x74]=19, [0x75]=19, [0x77]=19,
-    [0x84]=8, [0x85]=8, [0x8C]=8, [0x8D]=8,
-    [0x86]=19, [0x8E]=19, [0x96]=19, [0x9E]=19,
-    [0x94]=8, [0x95]=8, [0x9C]=8, [0x9D]=8,
-    [0xA4]=8, [0xA5]=8, [0xA6]=19,
-    [0xAC]=8, [0xAD]=8, [0xAE]=19,
-    [0xB4]=8, [0xB5]=8, [0xB6]=19,
-    [0xBC]=8, [0xBD]=8, [0xBE]=19,
-    [0xE1]=14, [0xE5]=15, [0xE9]=8, [0xE3]=23, [0xF9]=10,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0,
+    0, 14, 20, 10, 8, 8, 11, 0, 0, 15, 20, 10, 8, 8, 11, 0,
+    0, 0, 0, 0, 23, 23, 19, 0, 0, 15, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 8, 8, 19, 0, 0, 0, 0, 0, 8, 8, 19, 0,
+    0, 0, 0, 0, 8, 8, 19, 0, 0, 0, 0, 0, 8, 8, 19, 0,
+    8, 8, 8, 8, 8, 8, 19, 8, 8, 8, 8, 8, 8, 8, 19, 8,
+    19, 19, 19, 19, 19, 19, 0, 19, 0, 0, 0, 0, 8, 8, 19, 0,
+    0, 0, 0, 0, 8, 8, 19, 0, 0, 0, 0, 0, 8, 8, 19, 0,
+    0, 0, 0, 0, 8, 8, 19, 0, 0, 0, 0, 0, 8, 8, 19, 0,
+    0, 0, 0, 0, 8, 8, 19, 0, 0, 0, 0, 0, 8, 8, 19, 0,
+    0, 0, 0, 0, 8, 8, 19, 0, 0, 0, 0, 0, 8, 8, 19, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 14, 0, 23, 0, 15, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0,
 };
 
+// Полная таблица тактов для префикса ED, адаптированная под VS2010
 static const u16 ed_cycles[256] = {
-    [0x40]=12, [0x48]=12, [0x50]=12, [0x58]=12, [0x60]=12, [0x68]=12, [0x70]=12, [0x78]=12,
-    [0x41]=12, [0x49]=12, [0x51]=12, [0x59]=12, [0x61]=12, [0x69]=12, [0x71]=12, [0x79]=12,
-    [0x42]=15, [0x52]=15, [0x62]=15, [0x72]=15,
-    [0x4A]=15, [0x5A]=15, [0x6A]=15, [0x7A]=15,
-    [0x43]=20, [0x53]=20, [0x63]=20, [0x73]=20,
-    [0x4B]=20, [0x5B]=20, [0x6B]=20, [0x7B]=20,
-    [0x44]=8, [0x4C]=8, [0x54]=8, [0x5C]=8, [0x64]=8, [0x6C]=8, [0x74]=8, [0x7C]=8,
-    [0x45]=14, [0x55]=14, [0x65]=14, [0x75]=14, [0x5D]=14, [0x6D]=14, [0x7D]=14, [0x4D]=14,
-    [0x46]=8, [0x66]=8, [0x56]=8, [0x76]=8, [0x5E]=8, [0x7E]=8,
-    [0x47]=9, [0x4F]=9, [0x57]=9, [0x5F]=9,
-    [0x67]=18, [0x6F]=18,
-    [0xA0]=16, [0xA8]=16, [0xA1]=16, [0xA9]=16,
-    [0xB0]=16, [0xB8]=16, [0xB1]=16, [0xB9]=16,
-    [0xA2]=16, [0xAA]=16, [0xA3]=16, [0xAB]=16,
-    [0xB2]=16, [0xBA]=16, [0xB3]=16, [0xBB]=16,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    12, 12, 15, 20, 8, 14, 8, 9, 12, 12, 15, 20, 8, 14, 0, 9,
+    12, 12, 15, 20, 8, 14, 8, 9, 12, 12, 15, 20, 8, 14, 8, 9,
+    12, 12, 15, 20, 8, 14, 8, 18, 12, 12, 15, 20, 8, 14, 0, 18,
+    12, 12, 15, 20, 8, 14, 8, 0, 12, 12, 15, 20, 8, 14, 8, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    16, 16, 16, 16, 0, 0, 0, 0, 16, 16, 16, 16, 0, 0, 0, 0,
+    16, 16, 16, 16, 0, 0, 0, 0, 16, 16, 16, 16, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
 int step(void) {
@@ -423,7 +426,6 @@ int step(void) {
         case 1:
             call(0x38); R cycles + 13;
         case 2:
-
             call(r16((cpu.I << 8) | cpu.int_vec)); R cycles + 19;
         }
     }
@@ -597,19 +599,19 @@ int exec(u8 opc) {
     H(0xF1, t1=pop(); cpu.A=t1>>8; cpu.F=t1&0xFF;) R 10;
   
     H(0xDB, {
-        t3 = p8(); // Сначала читаем immediate-байт n из памяти
-        u16 full_port_addr = (cpu.A << 8) | t3; // Склеиваем порт: верхний байт = A, нижний = n
-        cpu.A = InPort(full_port_addr);
+        t3 = p8(); 
+        t2 = (cpu.A << 8) | t3; 
+        cpu.A = InPort(t2);
         cpu.wz = (cpu.A << 8) | (t3 + 1);
         R 11;
     })
     H(0xD3, {
-        t3 = p8(); // Читаем байт порта n из памяти
-        u16 full_port_addr = (cpu.A << 8) | t3; // Верхний байт = A, нижний = n
-        OutPort(full_port_addr, cpu.A);
+        t3 = p8(); 
+        t2 = (cpu.A << 8) | t3; 
+        OutPort(t2, cpu.A);
         cpu.wz = ((t3 + 1) & 0xFF) | (cpu.A << 8);
         R 11;
-        })
+    })
 
     case 0x08: {
         u8 na = cpu.A, nf = cpu.F;
@@ -628,7 +630,7 @@ int exec(u8 opc) {
     H(0xED, R exec_ed(p8())) H(0xFD, R exec_ind(p8(), &cpu.IY))
   
     default: 
-        fprintf(stderr, "Unknown opcode: 0x%02X\n", opc);
+//        fprintf(stderr, "Unknown opcode: 0x%02X\n", opc);
         R cyc;
     }
     R cyc;
@@ -716,9 +718,14 @@ int exec_ind(u8 opc, u16 * ir) {
 }
 
 int exec_cb(u8 opc) {
+    u8 dk, da, dr;
+    u8 hlr = 0;
+    u8* reg = 0;
     inc_r();
-    u8 dk = (opc >> 6) & 0b11; u8 da = (opc >> 3) & 0b111; u8 dr = opc & 0b111; 
-    u8 hlr = 0; u8* reg = 0;
+    
+    dk = (opc >> 6) & 0x03; 
+    da = (opc >> 3) & 0x07; 
+    dr = opc & 0x07; 
   
     switch (dr) {
     H(0,reg=&cpu.B) H(1,reg=&cpu.C) H(2,reg=&cpu.D) H(3,reg=&cpu.E) H(4,reg=&cpu.H)
@@ -746,7 +753,7 @@ int exec_cb(u8 opc) {
 
 int exec_cb2(u8 opc, u16 addr) {
     u8 val = r8(addr); u8 res = 0;
-    u8 dk = (opc >> 6) & 0b11; u8 da = (opc >> 3) & 0b111; u8 dr = opc & 0b111; 
+    u8 dk = (opc >> 6) & 0x03; u8 da = (opc >> 3) & 0x07; u8 dr = opc & 0x07; 
   
     switch (dk) {
     case 0:
@@ -761,7 +768,9 @@ int exec_cb2(u8 opc, u16 addr) {
         res = bt(val, da); xyf1(HI(addr));
         break;
     H(2, res=val&~(1<<da)) H(3, res=val|(1<<da))
-    default: fprintf(stderr, "Invalid IX/IY CB-prefixed opcode: %02X\n", opc);
+    default: 
+		break;
+//		fprintf(stderr, "Invalid IX/IY CB-prefixed opcode: %02X\n", opc);
     }
   
     if (dk != 1 && dr != 6)
@@ -856,16 +865,14 @@ int exec_ed(u8 opc) {
         if (opc <= 0x3F || opc >= 0x80) {
             R 8;
         }
-
-        // На случай, если пропущена какая-то редкая недокументированная команда из диапазона 0x40-0x7F
-        fprintf(stderr, "unknown ED opcode: %02X\n", opc);
+ //       fprintf(stderr, "unknown ED opcode: %02X\n", opc);
         R cyc;
     }
     R cyc;
 }
 
-
 #undef bit
 #undef H
 #undef HI
 #undef LO
+

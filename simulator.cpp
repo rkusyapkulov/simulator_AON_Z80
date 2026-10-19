@@ -4,15 +4,15 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "winmm.lib")
 #define OUT_OUTLINE_PRECISION 8
 #define CLIP_DEFAULT_PRECISION 0
 #include <windows.h>
-#include <stdio.h>
-#include <string.h>
 #include <stdint.h>
+
+#pragma comment (lib, "libcmt.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "winmm.lib")
 
 // --- СОВМЕСТИМОСТЬ С СИ-СТРУКТУРОЙ ИЗ Z80.C ---
 typedef uint8_t  u8;
@@ -550,9 +550,7 @@ void Reset() {
     ppi_ctrl = 0;
 
     // Очищаем ОЗУ
-    for (int i = 0; i < 8192; ++i) {
-        ram[i] = rand() & 255;
-    }
+    memset(ram, 0, 8192);
 }
 
 static const int KeyAddressMap[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
@@ -568,18 +566,26 @@ LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 }
 
 bool LoadROM(const wchar_t* filename) {
-    FILE* f = NULL;
-    if (_wfopen_s(&f, filename, L"rb") != 0 || !f) return false;
-    fseek(f, 0, SEEK_END);
-    loaded_rom_file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (loaded_rom_file_size <= 0) { fclose(f); return false; }
-
-    fread(rom, 1, loaded_rom_file_size, f);
-    fclose(f);
-    rom_size = loaded_rom_file_size;
-    return true;
+	// Открываем файл через Win32 API
+	HANDLE hFile = CreateFileW(
+		filename, 
+		GENERIC_READ, 
+		FILE_SHARE_READ, 
+		NULL, 
+		OPEN_EXISTING, 
+		FILE_ATTRIBUTE_NORMAL, 
+		NULL
+	);
+	
+	if (hFile == INVALID_HANDLE_VALUE) return false;
+	memset(rom, 0, ROM_SIZE);
+	DWORD bytesRead = 0;
+	// Читаем файл напрямую в буфер памяти
+	BOOL success = ReadFile(hFile, rom, (DWORD)ROM_SIZE, &bytesRead, NULL);
+	rom_size = bytesRead;
+	
+	CloseHandle(hFile);
+	return success && (bytesRead > 0);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -649,8 +655,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
 
             wchar_t gui_key_str[32];
-            if (final_direct_code != -1) swprintf_s(gui_key_str, 32, L"0x%02X", final_direct_code);
-            else swprintf_s(gui_key_str, 32, L"-");
+            if (final_direct_code != -1) wsprintfW(gui_key_str, L"0x%02X", final_direct_code);
+            else wsprintfW(gui_key_str, L"-");
 
             // Извлекаем текущие значения обратного отсчета для всех трех каналов DD8
             WORD ch0 = pit.channels[0].count_down;
@@ -658,7 +664,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             WORD ch2 = pit.channels[2].count_down;
 
             // --- ОБНОВЛЕННЫЙ ПАНЕЛЬНЫЙ ДИСПЛЕЙ ОТЛАДКИ ---
-            swprintf_s(debugBuf, 1024,
+            wsprintfW(debugBuf,
                 L"--- Z80 REGISTERS ---\r\nA: 0x%02X F: 0x%02X\r\nBC: 0x%02X%02X\r\nDE: 0x%02X%02X\r\nHL: 0x%02X%02X\r\nSP: 0x%04X PC: 0x%04X\r\nIX: 0x%04X IY: 0x%04X\r\n\r\n"
                 L"--- STATE ---\r\nIM MODE: %d\r\nGUI_KEY: %s\r\n\r\n"
                 L"--- PIT КР580ВИ53 ---\r\n"
@@ -677,7 +683,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
 
             wchar_t textBuf[64];
-            swprintf_s(textBuf, 64, L"[ %c%c%c%c%c%c%c%c ]",
+            wsprintfW(textBuf, L"[ %c%c%c%c%c%c%c%c ]",
                 display_digits[0], display_digits[1], display_digits[2], display_digits[3],
                 display_digits[4], display_digits[5], display_digits[6], display_digits[7]);
             SetWindowTextW(hEditDisplay, textBuf);
